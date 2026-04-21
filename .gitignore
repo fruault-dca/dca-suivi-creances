@@ -1,0 +1,74 @@
+# ============================================================
+# DONNÉES SENSIBLES - NE JAMAIS COMMITTER
+# ============================================================
+# Base de données locale (contient les créances + notes)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Fichiers FEC (données comptables confidentielles)
+FEC*.txt
+FEC*.csv
+*_FEC.txt
+fec*.txt
+
+# Exports CRM
+Chantiers*.xlsx
+*_CRM.xlsx
+*_crm.xlsx
+
+# Fichiers de mapping (peuvent contenir des infos clients)
+mapping*.csv
+mapping*.xlsx
+
+# Fichiers d'export générés
+relances_commerciaux_*.xlsx
+creances_powerbi_*.xlsx
+export_*.xlsx
+
+# ============================================================
+# SECRETS & CREDENTIALS
+# ============================================================
+.env
+.env.local
+*.key
+*.pem
+credentials.json
+service_account.json
+google_credentials.json
+.streamlit/secrets.toml
+
+# ============================================================
+# PYTHON
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ============================================================
+# IDE / ÉDITEURS
+# ============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# LOGS
+# ============================================================
+*.log
+logs/
