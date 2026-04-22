@@ -33,7 +33,7 @@ HEADERS = {
                  'agence', 'commercial', 'conducteur', 'etat', 'stade', 'type_contrat',
                  'contrat_ht', 'contrat_ttc', 'contrat_rev_ht', 'contrat_rev_ttc',
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
-    'mapping': ['piece_ref', 'ref_client', 'comp_aux_num'],
+    'mapping': ['piece_ref', 'ref_client', 'comp_aux_num', 'date_facture'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
               'action', 'echeance', 'statut'],
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
@@ -306,9 +306,15 @@ def load_creances_enrichies(only_open=True):
             return '/'.join(p.lstrip('0') or '0' for p in parts)
 
         df_c['_pk'] = df_c['piece_ref'].apply(norm_piece)
-        df_m2 = df_m[['piece_ref', 'ref_client']].copy()
+        map_cols = ['piece_ref', 'ref_client']
+        if 'date_facture' in df_m.columns:
+            map_cols.append('date_facture')
+        df_m2 = df_m[map_cols].copy()
         df_m2['_pk'] = df_m2['piece_ref'].apply(norm_piece)
-        df_m2 = df_m2.drop_duplicates('_pk')[['_pk', 'ref_client']]
+        keep_cols = ['_pk', 'ref_client']
+        if 'date_facture' in df_m2.columns:
+            keep_cols.append('date_facture')
+        df_m2 = df_m2.drop_duplicates('_pk')[keep_cols]
         df_c = df_c.merge(df_m2, on='_pk', how='left').drop(columns=['_pk'])
     else:
         df_c['ref_client'] = ''
@@ -328,18 +334,22 @@ def load_creances_enrichies(only_open=True):
     df_c.loc[mask_hors, 'ref_client'] = 'Hors CRM'
     df_c.loc[mask_hors, 'client'] = df_c.loc[mask_hors, 'comp_aux_lib']
 
-    # Jours de retard : priorité à la date de facture (piece_date),
-    # fallback sur la date d'écriture si piece_date absente
+    # Jours de retard : priorité à la date de facture du PROGEMI (date_facture),
+    # puis piece_date du FEC, puis fallback ecriture_date
     today = pd.Timestamp(datetime.now().date())
+    if 'date_facture' in df_c.columns:
+        df_c['_dt_progemi'] = pd.to_datetime(df_c['date_facture'], errors='coerce')
+    else:
+        df_c['_dt_progemi'] = pd.NaT
     if 'piece_date' in df_c.columns:
         df_c['_dt_piece'] = pd.to_datetime(df_c['piece_date'], errors='coerce')
     else:
         df_c['_dt_piece'] = pd.NaT
     df_c['_dt_ecr'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
-    df_c['_dt'] = df_c['_dt_piece'].fillna(df_c['_dt_ecr'])
+    df_c['_dt'] = df_c['_dt_progemi'].fillna(df_c['_dt_piece']).fillna(df_c['_dt_ecr'])
     df_c['jours_retard'] = (today - df_c['_dt']).dt.days
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
-    df_c = df_c.drop(columns=['_dt', '_dt_piece', '_dt_ecr'])
+    df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
     # Flag contentieux + responsable
     df_ct = read_sheet('contentieux')
@@ -505,6 +515,8 @@ def page_import():
                                'codedossier', 'refclient', 'refdossier']
                 aliases_comp = ['comp_aux_num', 'code_client', 'code_compta',
                                 'code_comptable']
+                aliases_date = ['date', 'date_facture', 'datefacture',
+                                'date_fact', 'date_piece', 'date_emission']
 
                 def normalize(s):
                     import unicodedata, re
@@ -540,11 +552,25 @@ def page_import():
                     col_piece = next(c for c in aliases_piece if c in df_map.columns)
                     col_ref = next(c for c in aliases_ref if c in df_map.columns)
                     col_comp = next((c for c in aliases_comp if c in df_map.columns), None)
+                    col_date = next((c for c in aliases_date if c in df_map.columns), None)
 
                     st.info(f"✅ En-tête détecté en ligne {detected_header + 1}. "
                             f"Colonnes utilisées : facture=`{col_piece}`, "
                             f"dossier=`{col_ref}`"
-                            + (f", client=`{col_comp}`" if col_comp else ""))
+                            + (f", client=`{col_comp}`" if col_comp else "")
+                            + (f", date=`{col_date}`" if col_date else ""))
+
+                    def _fmt_date(v):
+                        """Parse une date (str ou datetime) vers YYYY-MM-DD."""
+                        if v is None or str(v).strip() == '' or str(v).lower() == 'nan':
+                            return ''
+                        try:
+                            d = pd.to_datetime(v, errors='coerce', dayfirst=True)
+                            if pd.isna(d):
+                                return ''
+                            return d.date().isoformat()
+                        except Exception:
+                            return ''
 
                     # Construit un index des refs CRM : gère les dossiers regroupés (ex CRM "830/831")
                     # et normalise les zéros de tête (ex PROGEMI "830" <-> CRM "00830").
@@ -590,6 +616,7 @@ def page_import():
                             'piece_ref': pr,
                             'ref_client': resolved,
                             'comp_aux_num': to_str(r.get(col_comp, '')) if col_comp else '',
+                            'date_facture': _fmt_date(r.get(col_date, '')) if col_date else '',
                         })
 
                     new_df = pd.DataFrame(rows)
