@@ -10,7 +10,9 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import gspread
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
+import time, random
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
 
@@ -51,8 +53,25 @@ def get_spreadsheet():
     return client.open_by_key(st.secrets["google"]["sheet_id"])
 
 
+@st.cache_resource
 def get_ws(name):
     return get_spreadsheet().worksheet(name)
+
+
+def _with_retry(fn, *args, **kwargs):
+    """Appelle fn avec retry exponentiel sur les erreurs 429 (quota)."""
+    for attempt in range(5):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+            msg = str(e)
+            if code == 429 or '429' in msg or 'Quota exceeded' in msg:
+                wait = (2 ** attempt) + random.random()
+                time.sleep(wait)
+                continue
+            raise
+    raise APIError({"error": {"message": "Quota Google Sheets dépassé après 5 tentatives"}})
 
 
 def ensure_headers():
@@ -68,11 +87,11 @@ def ensure_headers():
             ws.update(values=[headers], range_name='A1')
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def read_sheet(name):
-    """Lit un onglet et retourne un DataFrame (cache 30s)."""
+    """Lit un onglet et retourne un DataFrame (cache 10 min pour économiser le quota)."""
     ws = get_ws(name)
-    records = ws.get_all_records()
+    records = _with_retry(ws.get_all_records)
     df = pd.DataFrame(records)
     if df.empty:
         df = pd.DataFrame(columns=HEADERS[name])
@@ -86,10 +105,10 @@ def clear_cache():
 def replace_sheet(name, df):
     """Écrase complètement un onglet avec un DataFrame."""
     ws = get_ws(name)
-    ws.clear()
+    _with_retry(ws.clear)
     headers = HEADERS[name]
     if df.empty:
-        ws.update(values=[headers], range_name='A1')
+        _with_retry(ws.update, values=[headers], range_name='A1')
     else:
         df2 = df.copy()
         for h in headers:
@@ -97,7 +116,7 @@ def replace_sheet(name, df):
                 df2[h] = ''
         df2 = df2[headers].fillna('').astype(str)
         values = [headers] + df2.values.tolist()
-        ws.update(values=values, range_name='A1')
+        _with_retry(ws.update, values=values, range_name='A1')
     clear_cache()
 
 
@@ -105,7 +124,7 @@ def append_row(name, row_dict):
     ws = get_ws(name)
     headers = HEADERS[name]
     row = [str(row_dict.get(h, '')) for h in headers]
-    ws.append_row(row, value_input_option='USER_ENTERED')
+    _with_retry(ws.append_row, row, value_input_option='USER_ENTERED')
     clear_cache()
 
 
