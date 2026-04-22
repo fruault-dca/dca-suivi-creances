@@ -25,9 +25,9 @@ SCOPES = [
 ]
 
 HEADERS = {
-    'creances': ['id', 'comp_aux_num', 'comp_aux_lib', 'piece_ref', 'ecriture_date',
-                 'journal_code', 'ecriture_lib', 'debit', 'credit', 'ecriture_let',
-                 'import_date'],
+    'creances': ['id', 'comp_aux_num', 'comp_aux_lib', 'piece_ref', 'piece_date',
+                 'ecriture_date', 'journal_code', 'ecriture_lib', 'debit', 'credit',
+                 'ecriture_let', 'import_date'],
     'dossiers': ['ref_client', 'code_affaire', 'client', 'email1', 'email2',
                  'type_projet', 'adresse', 'cp', 'ville', 'constructeur',
                  'agence', 'commercial', 'conducteur', 'etat', 'stade', 'type_contrat',
@@ -328,12 +328,18 @@ def load_creances_enrichies(only_open=True):
     df_c.loc[mask_hors, 'ref_client'] = 'Hors CRM'
     df_c.loc[mask_hors, 'client'] = df_c.loc[mask_hors, 'comp_aux_lib']
 
-    # Calcul des jours de retard (aujourd'hui - date d'écriture)
+    # Jours de retard : priorité à la date de facture (piece_date),
+    # fallback sur la date d'écriture si piece_date absente
     today = pd.Timestamp(datetime.now().date())
-    df_c['_dt'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
+    if 'piece_date' in df_c.columns:
+        df_c['_dt_piece'] = pd.to_datetime(df_c['piece_date'], errors='coerce')
+    else:
+        df_c['_dt_piece'] = pd.NaT
+    df_c['_dt_ecr'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
+    df_c['_dt'] = df_c['_dt_piece'].fillna(df_c['_dt_ecr'])
     df_c['jours_retard'] = (today - df_c['_dt']).dt.days
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
-    df_c = df_c.drop(columns=['_dt'])
+    df_c = df_c.drop(columns=['_dt', '_dt_piece', '_dt_ecr'])
 
     # Flag contentieux + responsable
     df_ct = read_sheet('contentieux')
@@ -373,6 +379,7 @@ def page_import():
                             'comp_aux_num': r['CompAuxNum'],
                             'comp_aux_lib': r['CompAuxLib'],
                             'piece_ref': r['PieceRef'],
+                            'piece_date': format_date_fec(r['PieceDate']),
                             'ecriture_date': format_date_fec(r['EcritureDate']),
                             'journal_code': r['JournalCode'],
                             'ecriture_lib': r['EcritureLib'],
