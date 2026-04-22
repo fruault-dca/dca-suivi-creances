@@ -247,33 +247,51 @@ def load_creances_enrichies(only_open=True):
     if only_open:
         df_c = df_c[(df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')]
 
-        # Auto-rapprochement non-lettré : pour chaque (client, piece_ref),
-        # si la somme débit - crédit ≈ 0, la facture est soldée → on la retire.
-        # Sinon on garde une ligne unique avec le solde net, en agrégeant les infos.
-        if not df_c.empty and 'piece_ref' in df_c.columns:
-            # On ne rapproche que les lignes qui ont une piece_ref
-            has_ref = df_c['piece_ref'].astype(str).str.strip() != ''
-            with_ref = df_c[has_ref].copy()
-            without_ref = df_c[~has_ref].copy()
+        # Auto-rapprochement FIFO par client :
+        # Pour chaque client, on prend tous ses encaissements non lettrés (crédits)
+        # et on les impute sur ses plus anciennes factures (débits) dans l'ordre.
+        # Ainsi, même si l'encaissement n'a pas la même piece_ref que la facture,
+        # le rapprochement se fait correctement au niveau du compte client.
+        if not df_c.empty:
+            kept_rows = []
+            # Tri sur date pour FIFO (plus anciennes d'abord)
+            df_c['_date_sort'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
 
-            if not with_ref.empty:
-                # Solde net par (client, facture)
-                nets = with_ref.groupby(['comp_aux_num', 'piece_ref'])['solde'] \
-                    .sum().reset_index().rename(columns={'solde': 'solde_net'})
-                with_ref = with_ref.merge(nets, on=['comp_aux_num', 'piece_ref'], how='left')
+            for comp_num, grp in df_c.groupby('comp_aux_num', dropna=False):
+                debits = grp[grp['debit'] > 0].sort_values('_date_sort').copy()
+                credits_sum = grp['credit'].sum()
 
-                # Filtre : on retire les factures totalement soldées (solde net ≈ 0)
-                with_ref = with_ref[with_ref['solde_net'].abs() > 0.01]
+                # Impute les crédits sur les débits les plus anciens (FIFO)
+                remaining = credits_sum
+                new_soldes = []
+                for _, d in debits.iterrows():
+                    montant = d['debit']
+                    if remaining >= montant - 0.01:
+                        remaining -= montant
+                        new_soldes.append(0.0)  # facture totalement soldée
+                    elif remaining > 0:
+                        new_soldes.append(montant - remaining)
+                        remaining = 0
+                    else:
+                        new_soldes.append(montant)
 
-                # On garde la ligne de débit la plus ancienne (= la facture d'origine)
-                # et on remplace son solde par le solde net de la facture
-                with_ref = with_ref.sort_values(['comp_aux_num', 'piece_ref', 'debit'],
-                                                ascending=[True, True, False])
-                with_ref = with_ref.drop_duplicates(['comp_aux_num', 'piece_ref'], keep='first')
-                with_ref['solde'] = with_ref['solde_net']
-                with_ref = with_ref.drop(columns=['solde_net'])
+                debits = debits.assign(solde=new_soldes)
+                # On retire les factures soldées
+                debits = debits[debits['solde'].abs() > 0.01]
+                kept_rows.append(debits)
 
-            df_c = pd.concat([with_ref, without_ref], ignore_index=True)
+                # Si après avoir imputé tous les débits il reste du crédit (avoir/trop-percu),
+                # on le remonte comme ligne négative (rare)
+                if remaining < -0.01:
+                    dummy = grp[grp['credit'] > 0].sort_values('_date_sort').head(1).copy()
+                    if not dummy.empty:
+                        dummy = dummy.assign(solde=-abs(remaining), debit=0, credit=abs(remaining))
+                        kept_rows.append(dummy)
+
+            df_c = pd.concat(kept_rows, ignore_index=True) if kept_rows else \
+                   df_c.iloc[0:0]
+            if '_date_sort' in df_c.columns:
+                df_c = df_c.drop(columns=['_date_sort'])
 
     if not df_m.empty and 'piece_ref' in df_m.columns:
         # Normalise piece_ref des deux côtés (enlève zéros de tête sur chaque segment)
