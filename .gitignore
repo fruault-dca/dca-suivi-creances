@@ -38,6 +38,7 @@ credentials.json
 service_account.json
 google_credentials.json
 .streamlit/secrets.toml
+!.streamlit/secrets.toml.example
 
 # ============================================================
 # PYTHON
@@ -58,10 +59,11 @@ dist/
 .mypy_cache/
 
 # ============================================================
-# IDE / ÉDITEURS
+# IDE / ÉDITEURS / OUTILS IA
 # ============================================================
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 .DS_Store

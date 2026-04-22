@@ -1,97 +1,162 @@
 """
 Suivi des Créances Clients - Application Streamlit
-Import FEC + CRM, suivi, notes, export commerciaux et Power BI
+Backend : Google Sheets (base de données partagée)
 """
 import streamlit as st
 import pandas as pd
-import sqlite3
 import io
 from datetime import datetime
-from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
-
-DB_PATH = Path(__file__).parent / "data" / "suivi.db"
-DB_PATH.parent.mkdir(exist_ok=True)
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
 
+# ============================================================
+# CONFIGURATION GOOGLE SHEETS
+# ============================================================
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+]
+
+HEADERS = {
+    'creances': ['id', 'comp_aux_num', 'comp_aux_lib', 'piece_ref', 'ecriture_date',
+                 'journal_code', 'ecriture_lib', 'debit', 'credit', 'ecriture_let',
+                 'import_date'],
+    'dossiers': ['ref_client', 'code_affaire', 'client', 'email1', 'email2',
+                 'type_projet', 'adresse', 'cp', 'ville', 'constructeur',
+                 'agence', 'commercial', 'etat', 'stade', 'type_contrat',
+                 'contrat_ht', 'contrat_ttc', 'contrat_rev_ht', 'contrat_rev_ttc',
+                 'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
+    'mapping': ['piece_ref', 'ref_client', 'comp_aux_num'],
+    'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
+              'action', 'echeance', 'statut'],
+}
+
+
+@st.cache_resource
+def get_gspread_client():
+    """Se connecte à Google Sheets via le compte de service."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+@st.cache_resource
+def get_spreadsheet():
+    client = get_gspread_client()
+    return client.open_by_key(st.secrets["google"]["sheet_id"])
+
+
+def get_ws(name):
+    return get_spreadsheet().worksheet(name)
+
+
+def ensure_headers():
+    """Écrit les en-têtes dans chaque onglet si absentes."""
+    ss = get_spreadsheet()
+    existing_sheets = {s.title for s in ss.worksheets()}
+    for sheet_name, headers in HEADERS.items():
+        if sheet_name not in existing_sheets:
+            ss.add_worksheet(title=sheet_name, rows=100, cols=len(headers))
+        ws = ss.worksheet(sheet_name)
+        first_row = ws.row_values(1)
+        if first_row != headers:
+            ws.update(values=[headers], range_name='A1')
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def read_sheet(name):
+    """Lit un onglet et retourne un DataFrame (cache 30s)."""
+    ws = get_ws(name)
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
+    if df.empty:
+        df = pd.DataFrame(columns=HEADERS[name])
+    return df
+
+
+def clear_cache():
+    st.cache_data.clear()
+
+
+def replace_sheet(name, df):
+    """Écrase complètement un onglet avec un DataFrame."""
+    ws = get_ws(name)
+    ws.clear()
+    headers = HEADERS[name]
+    if df.empty:
+        ws.update(values=[headers], range_name='A1')
+    else:
+        df2 = df.copy()
+        for h in headers:
+            if h not in df2.columns:
+                df2[h] = ''
+        df2 = df2[headers].fillna('').astype(str)
+        values = [headers] + df2.values.tolist()
+        ws.update(values=values, range_name='A1')
+    clear_cache()
+
+
+def append_row(name, row_dict):
+    ws = get_ws(name)
+    headers = HEADERS[name]
+    row = [str(row_dict.get(h, '')) for h in headers]
+    ws.append_row(row, value_input_option='USER_ENTERED')
+    clear_cache()
+
+
+def update_cell_by_id(name, row_id, column, new_value):
+    """Met à jour une cellule en trouvant la ligne par son id."""
+    ws = get_ws(name)
+    headers = HEADERS[name]
+    col_idx = headers.index(column) + 1
+    id_col_idx = headers.index('id') + 1
+    cell = ws.find(str(row_id), in_column=id_col_idx)
+    if cell:
+        ws.update_cell(cell.row, col_idx, new_value)
+        clear_cache()
+
+
+def delete_row_by_id(name, row_id):
+    ws = get_ws(name)
+    headers = HEADERS[name]
+    id_col_idx = headers.index('id') + 1
+    cell = ws.find(str(row_id), in_column=id_col_idx)
+    if cell:
+        ws.delete_rows(cell.row)
+        clear_cache()
+
+
+def next_id(df):
+    if df.empty or 'id' not in df.columns:
+        return 1
+    try:
+        return int(pd.to_numeric(df['id'], errors='coerce').max()) + 1
+    except (ValueError, TypeError):
+        return 1
+
 
 # ============================================================
-# BASE DE DONNÉES
+# VÉRIFICATION DE LA CONFIG
 # ============================================================
-def get_conn():
-    return sqlite3.connect(DB_PATH)
-
-
-def init_db():
-    conn = get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS creances (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            comp_aux_num TEXT,
-            comp_aux_lib TEXT,
-            piece_ref TEXT,
-            ecriture_date TEXT,
-            journal_code TEXT,
-            ecriture_lib TEXT,
-            debit REAL DEFAULT 0,
-            credit REAL DEFAULT 0,
-            ecriture_let TEXT,
-            import_date TEXT
-        );
-        CREATE TABLE IF NOT EXISTS dossiers (
-            ref_client TEXT PRIMARY KEY,
-            code_affaire TEXT,
-            client TEXT,
-            email1 TEXT,
-            email2 TEXT,
-            type_projet TEXT,
-            adresse TEXT,
-            cp TEXT,
-            ville TEXT,
-            constructeur TEXT,
-            agence TEXT,
-            commercial TEXT,
-            etat TEXT,
-            stade TEXT,
-            type_contrat TEXT,
-            contrat_ht REAL,
-            contrat_ttc REAL,
-            contrat_rev_ht REAL,
-            contrat_rev_ttc REAL,
-            avenants_ht REAL,
-            avenants_ttc REAL,
-            date_signature TEXT,
-            date_reception TEXT
-        );
-        CREATE TABLE IF NOT EXISTS mapping (
-            comp_aux_num TEXT PRIMARY KEY,
-            ref_client TEXT,
-            piece_ref TEXT
-        );
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ref_client TEXT,
-            comp_aux_num TEXT,
-            date_note TEXT,
-            auteur TEXT,
-            note TEXT,
-            action TEXT,
-            echeance TEXT,
-            statut TEXT DEFAULT 'Ouvert'
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-
-init_db()
+def check_config():
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return False, "Secret `gcp_service_account` manquant"
+        if "google" not in st.secrets or "sheet_id" not in st.secrets["google"]:
+            return False, "Secret `google.sheet_id` manquant"
+        ensure_headers()
+        return True, "OK"
+    except Exception as e:
+        return False, f"Erreur connexion Google Sheets : {e}"
 
 
 # ============================================================
-# HELPERS
+# HELPERS PARSING
 # ============================================================
 def to_float(val):
     if pd.isna(val) or val is None:
@@ -109,22 +174,17 @@ def to_str(val):
 
 
 def format_date_fec(d):
-    """20260101 -> 2026-01-01"""
     s = to_str(d)
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
     return s
 
 
-# ============================================================
-# PARSERS
-# ============================================================
 def parse_fec(file_content):
     cols = ['JournalCode', 'JournalLib', 'EcritureNum', 'EcritureDate', 'CompteNum',
             'CompteLib', 'CompAuxNum', 'CompAuxLib', 'PieceRef', 'PieceDate',
             'EcritureLib', 'Debit', 'Credit', 'EcritureLet', 'DateLet', 'ValidDate',
             'Montantdevise', 'Idevise']
-
     for enc in ['utf-8', 'latin-1', 'cp1252']:
         try:
             df = pd.read_csv(io.BytesIO(file_content), sep='\t', encoding=enc,
@@ -133,7 +193,7 @@ def parse_fec(file_content):
         except UnicodeDecodeError:
             continue
     else:
-        raise ValueError("Impossible de décoder le FEC (encoding)")
+        raise ValueError("Impossible de décoder le FEC")
 
     mask = df['CompteNum'].str.startswith('411', na=False)
     clients = df[mask].copy()
@@ -153,6 +213,57 @@ def parse_crm(file_content, sheet_name='Liste complète'):
     return data
 
 
+def load_creances_enrichies(only_open=True):
+    df_c = read_sheet('creances')
+    df_m = read_sheet('mapping')
+    df_d = read_sheet('dossiers')
+
+    if df_c.empty:
+        return pd.DataFrame()
+
+    df_c['debit'] = pd.to_numeric(df_c['debit'], errors='coerce').fillna(0)
+    df_c['credit'] = pd.to_numeric(df_c['credit'], errors='coerce').fillna(0)
+    df_c['solde'] = df_c['debit'] - df_c['credit']
+
+    if only_open:
+        df_c = df_c[(df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')]
+
+    if not df_m.empty and 'piece_ref' in df_m.columns:
+        # Normalise piece_ref des deux côtés (enlève zéros de tête sur chaque segment)
+        # pour matcher FEC "22/1" avec PROGEMI "22/0000001"
+        def norm_piece(s):
+            s = str(s).strip()
+            if not s:
+                return ''
+            parts = s.split('/')
+            return '/'.join(p.lstrip('0') or '0' for p in parts)
+
+        df_c['_pk'] = df_c['piece_ref'].apply(norm_piece)
+        df_m2 = df_m[['piece_ref', 'ref_client']].copy()
+        df_m2['_pk'] = df_m2['piece_ref'].apply(norm_piece)
+        df_m2 = df_m2.drop_duplicates('_pk')[['_pk', 'ref_client']]
+        df_c = df_c.merge(df_m2, on='_pk', how='left').drop(columns=['_pk'])
+    else:
+        df_c['ref_client'] = ''
+
+    if not df_d.empty:
+        dos_cols = ['ref_client', 'client', 'commercial', 'agence', 'etat',
+                    'stade', 'contrat_ttc', 'date_reception']
+        df_d_small = df_d[[c for c in dos_cols if c in df_d.columns]]
+        df_c = df_c.merge(df_d_small, on='ref_client', how='left')
+    else:
+        for col in ['client', 'commercial', 'agence', 'etat', 'stade',
+                    'contrat_ttc', 'date_reception']:
+            df_c[col] = ''
+
+    # Marque les factures Hors CRM pour les distinguer des non-rattachées
+    mask_hors = df_c['ref_client'] == '__HORS_CRM__'
+    df_c.loc[mask_hors, 'ref_client'] = 'Hors CRM'
+    df_c.loc[mask_hors, 'client'] = df_c.loc[mask_hors, 'comp_aux_lib']
+
+    return df_c.sort_values('solde', ascending=False)
+
+
 # ============================================================
 # PAGES
 # ============================================================
@@ -163,44 +274,45 @@ def page_import():
 
     with tab1:
         st.markdown("**Import du Fichier d'Écritures Comptables**")
-        st.caption("Extrait les comptes 411xxx (créances clients). Les écritures lettrées seront marquées comme soldées.")
+        st.caption("Extrait les comptes 411xxx. Les écritures lettrées sont marquées comme soldées.")
         fec_file = st.file_uploader("Fichier FEC (.txt)", type=['txt'], key='fec')
         if fec_file and st.button("Importer le FEC", type="primary"):
             try:
-                with st.spinner("Analyse du FEC..."):
+                with st.spinner("Analyse du FEC et écriture dans Google Sheets..."):
                     clients = parse_fec(fec_file.read())
-                    conn = get_conn()
-                    conn.execute("DELETE FROM creances")
-                    rows = [(r['CompAuxNum'], r['CompAuxLib'], r['PieceRef'],
-                             format_date_fec(r['EcritureDate']), r['JournalCode'],
-                             r['EcritureLib'], r['Debit'], r['Credit'],
-                             to_str(r['EcritureLet']), datetime.now().isoformat())
-                            for _, r in clients.iterrows()]
-                    conn.executemany("""INSERT INTO creances
-                        (comp_aux_num, comp_aux_lib, piece_ref, ecriture_date, journal_code,
-                         ecriture_lib, debit, credit, ecriture_let, import_date)
-                        VALUES (?,?,?,?,?,?,?,?,?,?)""", rows)
-                    conn.commit()
-                    conn.close()
+                    rows = []
+                    for i, (_, r) in enumerate(clients.iterrows(), 1):
+                        rows.append({
+                            'id': i,
+                            'comp_aux_num': r['CompAuxNum'],
+                            'comp_aux_lib': r['CompAuxLib'],
+                            'piece_ref': r['PieceRef'],
+                            'ecriture_date': format_date_fec(r['EcritureDate']),
+                            'journal_code': r['JournalCode'],
+                            'ecriture_lib': r['EcritureLib'],
+                            'debit': r['Debit'],
+                            'credit': r['Credit'],
+                            'ecriture_let': to_str(r['EcritureLet']),
+                            'import_date': datetime.now().isoformat(),
+                        })
+                    df_new = pd.DataFrame(rows)
+                    replace_sheet('creances', df_new)
                 st.success(f"✅ {len(clients)} écritures clients importées")
             except Exception as e:
-                st.error(f"Erreur: {e}")
+                st.error(f"Erreur : {e}")
 
     with tab2:
         st.markdown("**Import de l'export CRM (Chantiers)**")
-        st.caption("Données des dossiers : ref client, commercial, agence, état, montants contrat.")
         crm_file = st.file_uploader("Export CRM (.xlsx)", type=['xlsx'], key='crm')
         if crm_file:
             try:
                 xl = pd.ExcelFile(io.BytesIO(crm_file.getvalue()))
-                sheet = st.selectbox("Feuille à importer", xl.sheet_names,
-                                     index=xl.sheet_names.index('Liste complète')
-                                     if 'Liste complète' in xl.sheet_names else 0)
+                default_idx = xl.sheet_names.index('Liste complète') \
+                    if 'Liste complète' in xl.sheet_names else 0
+                sheet = st.selectbox("Feuille à importer", xl.sheet_names, index=default_idx)
                 if st.button("Importer le CRM", type="primary"):
-                    with st.spinner("Analyse du CRM..."):
+                    with st.spinner("Analyse du CRM et écriture dans Google Sheets..."):
                         data = parse_crm(crm_file.getvalue(), sheet_name=sheet)
-                        conn = get_conn()
-                        conn.execute("DELETE FROM dossiers")
 
                         def g(row, col):
                             return to_str(row.get(col, ''))
@@ -208,7 +320,7 @@ def page_import():
                         def gf(row, col):
                             v = row.get(col, '')
                             if pd.isna(v) or str(v).lower() == 'nan' or str(v).strip() == '':
-                                return None
+                                return ''
                             return to_float(v)
 
                         rows = []
@@ -216,125 +328,344 @@ def page_import():
                             ref = g(r, 'Ref client')
                             if not ref:
                                 continue
-                            rows.append((
-                                ref, g(r, 'N°Compta/Code Affaire'), g(r, 'Client(s)'),
-                                g(r, 'Client Email 1'), g(r, 'Client Email 2'),
-                                g(r, 'Type de projet'), g(r, 'Adresse du projet'),
-                                g(r, 'CP'), g(r, 'Ville'), g(r, 'Constructeur'),
-                                g(r, 'Agence'), g(r, 'Commercial'), g(r, 'Etat'),
-                                g(r, "Stade d'avancement"), g(r, 'Type de contrat'),
-                                gf(r, 'Contrat HT'), gf(r, 'Contrat TTC'),
-                                gf(r, 'Contrat révisé HT'), gf(r, 'Contrat révisé TTC'),
-                                gf(r, 'Avenants HT'), gf(r, 'Avenants TTC'),
-                                g(r, 'Date de signature du contrat'),
-                                g(r, 'Date de réception'),
-                            ))
-                        conn.executemany("""INSERT OR REPLACE INTO dossiers
-                            (ref_client, code_affaire, client, email1, email2, type_projet,
-                             adresse, cp, ville, constructeur, agence, commercial, etat, stade,
-                             type_contrat, contrat_ht, contrat_ttc, contrat_rev_ht, contrat_rev_ttc,
-                             avenants_ht, avenants_ttc, date_signature, date_reception)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
-                        conn.commit()
-                        conn.close()
+                            rows.append({
+                                'ref_client': ref,
+                                'code_affaire': g(r, 'N°Compta/Code Affaire'),
+                                'client': g(r, 'Client(s)'),
+                                'email1': g(r, 'Client Email 1'),
+                                'email2': g(r, 'Client Email 2'),
+                                'type_projet': g(r, 'Type de projet'),
+                                'adresse': g(r, 'Adresse du projet'),
+                                'cp': g(r, 'CP'),
+                                'ville': g(r, 'Ville'),
+                                'constructeur': g(r, 'Constructeur'),
+                                'agence': g(r, 'Agence'),
+                                'commercial': g(r, 'Commercial'),
+                                'etat': g(r, 'Etat'),
+                                'stade': g(r, "Stade d'avancement"),
+                                'type_contrat': g(r, 'Type de contrat'),
+                                'contrat_ht': gf(r, 'Contrat HT'),
+                                'contrat_ttc': gf(r, 'Contrat TTC'),
+                                'contrat_rev_ht': gf(r, 'Contrat révisé HT'),
+                                'contrat_rev_ttc': gf(r, 'Contrat révisé TTC'),
+                                'avenants_ht': gf(r, 'Avenants HT'),
+                                'avenants_ttc': gf(r, 'Avenants TTC'),
+                                'date_signature': g(r, 'Date de signature du contrat'),
+                                'date_reception': g(r, 'Date de réception'),
+                            })
+                        replace_sheet('dossiers', pd.DataFrame(rows))
                     st.success(f"✅ {len(rows)} dossiers importés")
-            except Exception as e:
-                st.error(f"Erreur: {e}")
-
-    with tab3:
-        st.markdown("**Mapping Code comptable ↔ Référence dossier**")
-        st.caption("Fichier Excel/CSV reliant `CompAuxNum` (code comptable FEC) à `Ref client` (CRM).")
-        st.info("Colonnes attendues : `comp_aux_num` (ex: CROBERT) et `ref_client` (ex: 00655). "
-                "Optionnel : `piece_ref` pour un mapping au niveau facture.")
-
-        map_file = st.file_uploader("Mapping (.csv ou .xlsx)", type=['csv', 'xlsx'], key='map')
-        if map_file and st.button("Importer le mapping", type="primary"):
-            try:
-                if map_file.name.endswith('.csv'):
-                    df_map = pd.read_csv(map_file, dtype=str)
-                else:
-                    df_map = pd.read_excel(map_file, dtype=str)
-                df_map.columns = [c.strip().lower() for c in df_map.columns]
-                conn = get_conn()
-                rows = [(to_str(r.get('comp_aux_num', '')),
-                         to_str(r.get('ref_client', '')),
-                         to_str(r.get('piece_ref', '')))
-                        for _, r in df_map.iterrows()
-                        if to_str(r.get('comp_aux_num', ''))]
-                conn.executemany("INSERT OR REPLACE INTO mapping VALUES (?,?,?)", rows)
-                conn.commit()
-                conn.close()
-                st.success(f"✅ {len(rows)} correspondances importées")
             except Exception as e:
                 st.error(f"Erreur : {e}")
 
-        st.markdown("**Mapping manuel** (clients non mappés)")
-        conn = get_conn()
-        non_mappes = pd.read_sql("""
-            SELECT DISTINCT c.comp_aux_num, c.comp_aux_lib,
-                ROUND(SUM(c.debit - c.credit), 2) as solde
-            FROM creances c
-            LEFT JOIN mapping m ON c.comp_aux_num = m.comp_aux_num
-            WHERE m.comp_aux_num IS NULL AND c.ecriture_let IS NULL OR c.ecriture_let = ''
-            GROUP BY c.comp_aux_num
-            HAVING solde > 0
-            ORDER BY solde DESC
-        """, conn)
-        dossiers = pd.read_sql("SELECT ref_client, client FROM dossiers ORDER BY ref_client", conn)
-        conn.close()
+    with tab3:
+        st.markdown("**Import du fichier de facturation** (lien facture ↔ dossier CRM)")
+        st.info(
+            "Fichier CSV/Excel contenant les correspondances entre numéros de facture "
+            "(présents dans le FEC) et références dossier (présentes dans le CRM).\n\n"
+            "**Colonnes attendues** :\n"
+            "- `piece_ref` — numéro de facture (ex: `26/0000002`, `21/52`)\n"
+            "- `ref_client` — référence dossier CRM (ex: `00655`, `976`)\n"
+            "- `comp_aux_num` — *optionnel*, code comptable client (ex: `CROBERT`)\n\n"
+            "💡 Les noms de colonnes peuvent varier : `numero_facture`, `num_facture`, "
+            "`facture`, `ref_dossier`, `dossier` sont aussi reconnus."
+        )
 
-        if not non_mappes.empty and not dossiers.empty:
-            st.write(f"**{len(non_mappes)} clients non mappés avec solde ouvert**")
-            options = [''] + [f"{r['ref_client']} - {r['client']}" for _, r in dossiers.iterrows()]
-            for _, row in non_mappes.head(20).iterrows():
-                c1, c2, c3 = st.columns([2, 2, 1])
-                c1.write(f"**{row['comp_aux_lib']}** ({row['comp_aux_num']})")
-                sel = c2.selectbox("Ref dossier", options, key=f"map_{row['comp_aux_num']}",
-                                   label_visibility="collapsed")
-                c3.write(f"{row['solde']:,.0f} €")
-                if sel:
-                    ref = sel.split(' - ')[0]
-                    conn2 = get_conn()
-                    conn2.execute("INSERT OR REPLACE INTO mapping VALUES (?,?,?)",
-                                  (row['comp_aux_num'], ref, ''))
-                    conn2.commit()
-                    conn2.close()
-                    st.rerun()
+        map_file = st.file_uploader("Fichier de facturation (.csv ou .xlsx)",
+                                    type=['csv', 'xlsx'], key='map')
 
-    # Stats
+        # Option pour cumuler (ajouter) ou remplacer
+        mode = st.radio("Mode d'import",
+                        ["Remplacer tout le mapping existant",
+                         "Ajouter / mettre à jour (cumul multi-années)"],
+                        horizontal=True, key='map_mode')
+
+        if map_file and st.button("Importer le fichier de facturation", type="primary"):
+            try:
+                # Aliases (normalisés sans accent ni espace)
+                aliases_piece = ['piece_ref', 'numero_facture', 'num_facture',
+                                 'facture', 'n_facture', 'no_facture', 'piece',
+                                 'nfacture', 'numfacture']
+                aliases_ref = ['ref_client', 'ref_dossier', 'dossier', 'ref',
+                               'code_affaire', 'n_compta', 'code_dossier',
+                               'codedossier', 'refclient', 'refdossier']
+                aliases_comp = ['comp_aux_num', 'code_client', 'code_compta',
+                                'code_comptable']
+
+                def normalize(s):
+                    import unicodedata, re
+                    s = str(s).strip().lower()
+                    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode()
+                    s = re.sub(r'[^a-z0-9]+', '_', s).strip('_')
+                    return s
+
+                # Détection auto de la ligne d'en-tête (cherche "n° facture" ou similaire)
+                df_map = None
+                detected_header = None
+                for header_row in range(0, 5):
+                    try:
+                        if map_file.name.endswith('.csv'):
+                            tmp = pd.read_csv(map_file, dtype=str, header=header_row)
+                        else:
+                            map_file.seek(0)
+                            tmp = pd.read_excel(map_file, dtype=str, header=header_row)
+                        norm_cols = [normalize(c) for c in tmp.columns]
+                        if any(c in aliases_piece for c in norm_cols) and \
+                           any(c in aliases_ref for c in norm_cols):
+                            df_map = tmp
+                            df_map.columns = norm_cols
+                            detected_header = header_row
+                            break
+                    except Exception:
+                        continue
+
+                if df_map is None:
+                    st.error("Impossible de détecter les colonnes `facture` et `dossier` "
+                             "dans le fichier. Vérifiez les en-têtes.")
+                else:
+                    col_piece = next(c for c in aliases_piece if c in df_map.columns)
+                    col_ref = next(c for c in aliases_ref if c in df_map.columns)
+                    col_comp = next((c for c in aliases_comp if c in df_map.columns), None)
+
+                    st.info(f"✅ En-tête détecté en ligne {detected_header + 1}. "
+                            f"Colonnes utilisées : facture=`{col_piece}`, "
+                            f"dossier=`{col_ref}`"
+                            + (f", client=`{col_comp}`" if col_comp else ""))
+
+                    # Construit un index des refs CRM : gère les dossiers regroupés (ex CRM "830/831")
+                    # et normalise les zéros de tête (ex PROGEMI "830" <-> CRM "00830").
+                    # Chaque sous-ref d'un dossier CRM groupé pointe vers la ref CRM complète.
+                    df_d_current = read_sheet('dossiers')
+                    crm_refs = df_d_current['ref_client'].astype(str).tolist() \
+                        if not df_d_current.empty and 'ref_client' in df_d_current.columns else []
+                    import re as _re
+                    crm_index = {}  # clé = sous-ref normalisée sans zéros, valeur = ref CRM d'origine
+                    for cr in crm_refs:
+                        cr_clean = cr.strip()
+                        if not cr_clean:
+                            continue
+                        # Éclate les dossiers groupés côté CRM et indexe chaque sous-ref
+                        for sub in _re.split(r'[/,;]+', cr_clean):
+                            sub = sub.strip()
+                            if sub:
+                                crm_index[sub.lstrip('0') or '0'] = cr_clean
+                        # Indexe aussi la ref complète telle quelle (au cas où PROGEMI contient "830/831")
+                        crm_index[cr_clean.lstrip('0') or '0'] = cr_clean
+
+                    def resolve_ref(raw):
+                        """Renvoie la ref CRM (éventuellement groupée) si trouvée, sinon la ref brute."""
+                        raw = str(raw).strip()
+                        if not raw:
+                            return ''
+                        key = raw.lstrip('0') or '0'
+                        return crm_index.get(key, raw)
+
+                    rows = []
+                    nb_groupes_crm = sum(1 for cr in crm_refs if _re.search(r'[/,;]', cr or ''))
+                    nb_non_resolus = 0
+                    crm_values = set(crm_index.values())
+                    for _, r in df_map.iterrows():
+                        pr = to_str(r.get(col_piece, ''))
+                        rc_raw = to_str(r.get(col_ref, ''))
+                        if not pr or not rc_raw or pr.lower() == 'nan':
+                            continue
+                        resolved = resolve_ref(rc_raw)
+                        if resolved not in crm_values:
+                            nb_non_resolus += 1
+                        rows.append({
+                            'piece_ref': pr,
+                            'ref_client': resolved,
+                            'comp_aux_num': to_str(r.get(col_comp, '')) if col_comp else '',
+                        })
+
+                    new_df = pd.DataFrame(rows)
+                    if nb_groupes_crm:
+                        st.info(f"🔀 {nb_groupes_crm} dossiers CRM regroupés détectés "
+                                f"(ex: `830/831`) — les factures PROGEMI `830` et `831` "
+                                f"pointeront toutes vers le dossier groupé")
+                    if nb_non_resolus and crm_values:
+                        st.warning(f"⚠️ {nb_non_resolus} refs PROGEMI non trouvées dans le CRM "
+                                   f"(importez d'abord le CRM ou vérifiez les codes)")
+
+                    if mode.startswith("Ajouter"):
+                        existing = read_sheet('mapping')
+                        if not existing.empty:
+                            # Upsert : on retire les piece_ref déjà présentes, on ajoute les nouvelles
+                            existing = existing[~existing['piece_ref'].isin(new_df['piece_ref'])]
+                            merged = pd.concat([existing, new_df], ignore_index=True)
+                        else:
+                            merged = new_df
+                        replace_sheet('mapping', merged)
+                        st.success(f"✅ {len(rows)} correspondances importées "
+                                   f"(total : {len(merged)})")
+                    else:
+                        replace_sheet('mapping', new_df)
+                        st.success(f"✅ {len(rows)} correspondances facture → dossier importées")
+            except Exception as e:
+                st.error(f"Erreur : {e}")
+
+        st.divider()
+        st.markdown("**Affectation manuelle** — factures non rattachées à un dossier")
+        st.caption("Les choix sont sauvegardés dans Google Sheets et persistent à chaque import. "
+                   "Marquez une facture « Hors CRM » pour qu'elle ne réapparaisse plus.")
+
+        df_c = read_sheet('creances')
+        df_m = read_sheet('mapping')
+        df_d = read_sheet('dossiers')
+
+        # Même fonction de normalisation que dans load_creances_enrichies
+        def _norm_piece(s):
+            s = str(s).strip()
+            if not s:
+                return ''
+            return '/'.join(p.lstrip('0') or '0' for p in s.split('/'))
+
+        if not df_c.empty and not df_d.empty:
+            df_c['debit'] = pd.to_numeric(df_c['debit'], errors='coerce').fillna(0)
+            df_c['credit'] = pd.to_numeric(df_c['credit'], errors='coerce').fillna(0)
+            df_c['solde'] = df_c['debit'] - df_c['credit']
+            df_c = df_c[(df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')]
+            df_c = df_c[df_c['solde'] > 0]
+
+            # Compare sur clé normalisée pour gérer 22/1 vs 22/0000001
+            mapped_keys = set(df_m['piece_ref'].apply(_norm_piece).tolist()) \
+                if not df_m.empty else set()
+            df_c['_pk'] = df_c['piece_ref'].apply(_norm_piece)
+            non_map = df_c[~df_c['_pk'].isin(mapped_keys)]
+            non_map = non_map.groupby(['piece_ref', 'comp_aux_num', 'comp_aux_lib']).agg(
+                solde=('solde', 'sum'),
+                date=('ecriture_date', 'first')
+            ).reset_index().sort_values('solde', ascending=False)
+
+            if non_map.empty:
+                st.success("✅ Toutes les factures ouvertes sont rattachées (ou marquées Hors CRM).")
+            else:
+                total_non_map = non_map['solde'].sum()
+                c_a, c_b = st.columns(2)
+                c_a.metric("Factures à traiter", len(non_map))
+                c_b.metric("Montant concerné", f"{total_non_map:,.0f} €".replace(",", " "))
+
+                # Auto-classification Hors CRM par motif (préfixe de piece_ref)
+                with st.expander("⚡ Auto-classer des factures comme Hors CRM (par motif)"):
+                    import re as _re2
+                    pattern = st.text_input(
+                        "Motif regex sur le n° de facture",
+                        value=r"^FC",
+                        help="Exemples : `^FC` pour toutes les factures commençant par FC, "
+                             "`^(FC|AV)` pour FC ou AV, `^FC\\d+$` pour FC suivi de chiffres uniquement"
+                    )
+                    try:
+                        rx = _re2.compile(pattern, _re2.IGNORECASE)
+                        preview = non_map[non_map['piece_ref'].apply(
+                            lambda x: bool(rx.search(str(x))))]
+                    except _re2.error as e:
+                        st.error(f"Motif invalide : {e}")
+                        preview = pd.DataFrame()
+
+                    if not preview.empty:
+                        st.write(f"**{len(preview)} factures** correspondraient au motif "
+                                 f"(total : {preview['solde'].sum():,.0f} €)".replace(",", " "))
+                        st.dataframe(
+                            preview[['piece_ref', 'comp_aux_lib', 'solde']].head(10),
+                            use_container_width=True, hide_index=True
+                        )
+                        if st.button(f"⊘ Marquer ces {len(preview)} factures Hors CRM",
+                                     type="primary", key="btn_auto_hors"):
+                            new_rows = pd.DataFrame([{
+                                'piece_ref': r['piece_ref'],
+                                'ref_client': '__HORS_CRM__',
+                                'comp_aux_num': r['comp_aux_num'],
+                            } for _, r in preview.iterrows()])
+                            # retire d'abord les éventuels mappings existants sur ces pieces
+                            keys_to_remove = set(preview['piece_ref'].apply(_norm_piece))
+                            existing = df_m[~df_m['piece_ref'].apply(_norm_piece)
+                                             .isin(keys_to_remove)] \
+                                if not df_m.empty else pd.DataFrame(columns=HEADERS['mapping'])
+                            merged = pd.concat([existing, new_rows], ignore_index=True)
+                            replace_sheet('mapping', merged)
+                            st.success(f"✅ {len(preview)} factures marquées Hors CRM")
+                            st.rerun()
+                    elif pattern:
+                        st.info("Aucune facture ne correspond à ce motif.")
+
+                # Recherche + pagination
+                q = st.text_input("🔎 Rechercher (n° facture, client, code compta)",
+                                  key="search_nonmap").strip().lower()
+                if q:
+                    mask = (non_map['piece_ref'].str.lower().str.contains(q, na=False)
+                            | non_map['comp_aux_lib'].str.lower().str.contains(q, na=False)
+                            | non_map['comp_aux_num'].str.lower().str.contains(q, na=False))
+                    non_map = non_map[mask]
+
+                per_page = 25
+                nb_pages = max(1, (len(non_map) + per_page - 1) // per_page)
+                page = st.number_input(f"Page (1 à {nb_pages})", min_value=1,
+                                       max_value=nb_pages, value=1, step=1,
+                                       key="page_nonmap")
+                start = (page - 1) * per_page
+                page_df = non_map.iloc[start:start + per_page]
+
+                # Options dossiers CRM + option spéciale Hors CRM
+                HORS_CRM = "__HORS_CRM__"
+                options_labels = ["— Choisir un dossier —",
+                                  "⊘ Hors CRM (facture sans dossier)"]
+                options_vals = ["", HORS_CRM]
+                for _, r in df_d.iterrows():
+                    if r['ref_client']:
+                        options_labels.append(f"{r['ref_client']} — {r['client']}")
+                        options_vals.append(r['ref_client'])
+
+                st.divider()
+                for _, row in page_df.iterrows():
+                    c1, c2, c3 = st.columns([2, 3, 1])
+                    c1.write(f"**{row['piece_ref']}**")
+                    c1.caption(f"{row['comp_aux_num']} — {row['comp_aux_lib']}")
+                    idx = c2.selectbox(
+                        "Dossier", range(len(options_labels)),
+                        format_func=lambda i: options_labels[i],
+                        key=f"map_{row['piece_ref']}",
+                        label_visibility="collapsed")
+                    c3.write(f"{row['solde']:,.0f} €".replace(",", " "))
+                    if idx > 0:  # 0 = placeholder "— Choisir —"
+                        ref_val = options_vals[idx]
+                        new_row = pd.DataFrame([{
+                            'piece_ref': row['piece_ref'],
+                            'ref_client': ref_val,
+                            'comp_aux_num': row['comp_aux_num'],
+                        }])
+                        existing = df_m[df_m['piece_ref'].apply(_norm_piece)
+                                        != _norm_piece(row['piece_ref'])] \
+                            if not df_m.empty else pd.DataFrame(columns=HEADERS['mapping'])
+                        df_m_updated = pd.concat([existing, new_row], ignore_index=True)
+                        replace_sheet('mapping', df_m_updated)
+                        st.rerun()
+
+            # --- Section Hors CRM : permet de revenir en arrière ---
+            if not df_m.empty and (df_m['ref_client'] == '__HORS_CRM__').any():
+                with st.expander("⊘ Factures marquées Hors CRM (cliquer pour réaffecter)"):
+                    hors = df_m[df_m['ref_client'] == '__HORS_CRM__']
+                    st.write(f"{len(hors)} facture(s) marquée(s) Hors CRM")
+                    for _, hr in hors.iterrows():
+                        cc1, cc2 = st.columns([3, 1])
+                        cc1.write(f"**{hr['piece_ref']}** ({hr['comp_aux_num']})")
+                        if cc2.button("↶ Annuler", key=f"unhors_{hr['piece_ref']}"):
+                            df_m_cleaned = df_m[df_m['piece_ref'] != hr['piece_ref']]
+                            replace_sheet('mapping', df_m_cleaned)
+                            st.rerun()
+
     st.divider()
-    conn = get_conn()
-    n_cr = conn.execute("SELECT COUNT(*) FROM creances").fetchone()[0]
-    n_cr_ouv = conn.execute("""SELECT COUNT(*) FROM creances
-        WHERE (ecriture_let IS NULL OR ecriture_let = '')""").fetchone()[0]
-    n_dos = conn.execute("SELECT COUNT(*) FROM dossiers").fetchone()[0]
-    n_map = conn.execute("SELECT COUNT(*) FROM mapping").fetchone()[0]
-    conn.close()
+    df_c = read_sheet('creances')
+    df_d = read_sheet('dossiers')
+    df_m = read_sheet('mapping')
+    n_cr = len(df_c)
+    n_cr_ouv = 0
+    if not df_c.empty and 'ecriture_let' in df_c.columns:
+        n_cr_ouv = len(df_c[(df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')])
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Écritures FEC", n_cr)
-    c2.metric("Écritures non lettrées", n_cr_ouv)
-    c3.metric("Dossiers CRM", n_dos)
-    c4.metric("Mappings actifs", n_map)
-
-
-def load_creances_enrichies(only_open=True):
-    conn = get_conn()
-    where = "WHERE (c.ecriture_let IS NULL OR c.ecriture_let = '')" if only_open else ""
-    df = pd.read_sql(f"""
-        SELECT c.id, c.comp_aux_num, c.comp_aux_lib, c.piece_ref, c.ecriture_date,
-               c.journal_code, c.ecriture_lib, c.debit, c.credit,
-               (c.debit - c.credit) as solde,
-               m.ref_client,
-               d.client, d.commercial, d.agence, d.etat, d.stade,
-               d.contrat_ttc, d.date_reception
-        FROM creances c
-        LEFT JOIN mapping m ON c.comp_aux_num = m.comp_aux_num
-        LEFT JOIN dossiers d ON m.ref_client = d.ref_client
-        {where}
-        ORDER BY solde DESC
-    """, conn)
-    conn.close()
-    return df
+    c2.metric("Non lettrées", n_cr_ouv)
+    c3.metric("Dossiers CRM", len(df_d))
+    c4.metric("Mappings", len(df_m))
 
 
 def page_creances():
@@ -347,15 +678,14 @@ def page_creances():
 
     df = df[df['solde'].abs() > 0.01]
 
-    with st.container():
-        c1, c2, c3, c4 = st.columns(4)
-        coms = ['(Tous)'] + sorted([c for c in df['commercial'].dropna().unique() if c])
-        filt_com = c1.selectbox("Commercial", coms)
-        ags = ['(Toutes)'] + sorted([a for a in df['agence'].dropna().unique() if a])
-        filt_ag = c2.selectbox("Agence", ags)
-        etats = ['(Tous)'] + sorted([e for e in df['etat'].dropna().unique() if e])
-        filt_et = c3.selectbox("État dossier", etats)
-        seuil = c4.number_input("Solde mini (€)", value=0, step=500)
+    c1, c2, c3, c4 = st.columns(4)
+    coms = ['(Tous)'] + sorted([c for c in df['commercial'].dropna().unique() if c])
+    filt_com = c1.selectbox("Commercial", coms)
+    ags = ['(Toutes)'] + sorted([a for a in df['agence'].dropna().unique() if a])
+    filt_ag = c2.selectbox("Agence", ags)
+    etats = ['(Tous)'] + sorted([e for e in df['etat'].dropna().unique() if e])
+    filt_et = c3.selectbox("État dossier", etats)
+    seuil = c4.number_input("Solde mini (€)", value=0, step=500)
 
     f = df.copy()
     if filt_com != '(Tous)':
@@ -368,13 +698,13 @@ def page_creances():
 
     total = f['solde'].sum()
     nb_cli = f['comp_aux_num'].nunique()
-    nb_dos_mappes = f['ref_client'].notna().sum()
-    non_mappe = f[f['ref_client'].isna()]['solde'].sum()
+    nb_mappes = f['ref_client'].fillna('').astype(bool).sum()
+    non_mappe = f[f['ref_client'].fillna('') == '']['solde'].sum()
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Solde total dû", f"{total:,.0f} €".replace(",", " "))
     k2.metric("Clients concernés", nb_cli)
-    k3.metric("Lignes rattachées CRM", f"{nb_dos_mappes} / {len(f)}")
+    k3.metric("Lignes rattachées", f"{nb_mappes} / {len(f)}")
     k4.metric("Non rattaché (€)", f"{non_mappe:,.0f}".replace(",", " "))
 
     st.subheader("Synthèse par client")
@@ -415,44 +745,39 @@ def page_creances():
 def page_notes():
     st.header("📝 Notes & Relances")
 
-    conn = get_conn()
-    clients = pd.read_sql("""
-        SELECT DISTINCT c.comp_aux_num, c.comp_aux_lib,
-            ROUND(SUM(c.debit - c.credit), 2) as solde,
-            d.client, d.commercial
-        FROM creances c
-        LEFT JOIN mapping m ON c.comp_aux_num = m.comp_aux_num
-        LEFT JOIN dossiers d ON m.ref_client = d.ref_client
-        WHERE (c.ecriture_let IS NULL OR c.ecriture_let = '')
-        GROUP BY c.comp_aux_num
-        HAVING solde > 0
-        ORDER BY solde DESC
-    """, conn)
-
-    if clients.empty:
+    df_full = load_creances_enrichies(only_open=True)
+    if df_full.empty:
         st.warning("Aucune créance ouverte. Importez le FEC.")
-        conn.close()
         return
+
+    df_full = df_full[df_full['solde'] > 0.01]
+    clients = df_full.groupby(['comp_aux_num', 'comp_aux_lib']).agg(
+        solde=('solde', 'sum'),
+        client=('client', 'first'),
+        commercial=('commercial', 'first'),
+        ref_client=('ref_client', 'first'),
+    ).reset_index().sort_values('solde', ascending=False)
+
+    notes_df = read_sheet('notes')
+    if not notes_df.empty:
+        notes_df['id'] = pd.to_numeric(notes_df['id'], errors='coerce')
 
     labels = {f"{r['comp_aux_lib']} — {r['solde']:,.0f} €".replace(",", " "): r['comp_aux_num']
               for _, r in clients.iterrows()}
     sel = st.selectbox("Client", ['— Vue globale —'] + list(labels.keys()))
 
     if sel == '— Vue globale —':
-        notes = pd.read_sql("""
-            SELECT n.date_note, n.comp_aux_num, d.client, d.commercial,
-                   n.auteur, n.note, n.action, n.echeance, n.statut
-            FROM notes n
-            LEFT JOIN mapping m ON n.comp_aux_num = m.comp_aux_num
-            LEFT JOIN dossiers d ON m.ref_client = d.ref_client
-            ORDER BY n.date_note DESC
-        """, conn)
-        conn.close()
-        st.subheader(f"Toutes les relances ({len(notes)})")
-        if notes.empty:
-            st.info("Aucune note enregistrée.")
+        st.subheader(f"Toutes les relances ({len(notes_df)})")
+        if notes_df.empty:
+            st.info("Aucune note.")
         else:
-            st.dataframe(notes, use_container_width=True, hide_index=True)
+            enriched = notes_df.merge(
+                clients[['comp_aux_num', 'client', 'commercial']],
+                on='comp_aux_num', how='left')
+            st.dataframe(
+                enriched[['date_note', 'comp_aux_num', 'client', 'commercial',
+                          'auteur', 'action', 'note', 'echeance', 'statut']],
+                use_container_width=True, hide_index=True)
         return
 
     comp_aux_num = labels[sel]
@@ -463,55 +788,47 @@ def page_notes():
     c2.write(f"**Client CRM :** {info['client'] or '(non rattaché)'}")
     c3.write(f"**Commercial :** {info['commercial'] or '—'}")
 
-    fac = pd.read_sql("""SELECT piece_ref, ecriture_date, ecriture_lib, debit, credit,
-        (debit-credit) as solde FROM creances
-        WHERE comp_aux_num = ? AND (ecriture_let IS NULL OR ecriture_let = '')
-        ORDER BY ecriture_date""", conn, params=(comp_aux_num,))
-    with st.expander(f"Détail des {len(fac)} lignes ouvertes", expanded=False):
+    fac = df_full[df_full['comp_aux_num'] == comp_aux_num][
+        ['piece_ref', 'ecriture_date', 'ecriture_lib', 'debit', 'credit', 'solde']]
+    with st.expander(f"Détail des {len(fac)} lignes ouvertes"):
         st.dataframe(fac.rename(columns={
             'piece_ref': 'Réf.', 'ecriture_date': 'Date', 'ecriture_lib': 'Libellé',
             'debit': 'Débit', 'credit': 'Crédit', 'solde': 'Solde'
         }), use_container_width=True, hide_index=True)
 
     st.subheader("Historique des relances")
-    notes = pd.read_sql("SELECT * FROM notes WHERE comp_aux_num=? ORDER BY date_note DESC",
-                        conn, params=(comp_aux_num,))
-    conn.close()
+    client_notes = notes_df[notes_df['comp_aux_num'] == comp_aux_num] \
+        if not notes_df.empty else pd.DataFrame()
+    if not client_notes.empty:
+        client_notes = client_notes.sort_values('date_note', ascending=False)
 
-    if notes.empty:
+    if client_notes.empty:
         st.info("Aucune note pour ce client.")
     else:
-        for _, n in notes.iterrows():
+        for _, n in client_notes.iterrows():
             icon = {'Ouvert': '🔴', 'En cours': '🟡', 'Résolu': '🟢'}.get(n['statut'], '⚪')
-            with st.expander(f"{icon} {n['date_note']} — {n['auteur']} — {n['action'] or '(note)'}",
-                             expanded=False):
+            with st.expander(f"{icon} {n['date_note']} — {n['auteur']} — {n['action'] or '(note)'}"):
                 st.write(n['note'])
                 if n['echeance']:
                     st.caption(f"📅 Échéance : {n['echeance']}")
                 cols = st.columns([2, 1, 1])
-                new_st = cols[0].selectbox(
-                    "Statut", ['Ouvert', 'En cours', 'Résolu'],
-                    index=['Ouvert', 'En cours', 'Résolu'].index(n['statut']),
-                    key=f"st_{n['id']}"
-                )
+                statuts = ['Ouvert', 'En cours', 'Résolu']
+                cur_idx = statuts.index(n['statut']) if n['statut'] in statuts else 0
+                new_st = cols[0].selectbox("Statut", statuts, index=cur_idx,
+                                           key=f"st_{n['id']}")
                 if cols[1].button("Mettre à jour", key=f"up_{n['id']}"):
-                    c2 = get_conn()
-                    c2.execute("UPDATE notes SET statut=? WHERE id=?", (new_st, n['id']))
-                    c2.commit()
-                    c2.close()
+                    update_cell_by_id('notes', int(n['id']), 'statut', new_st)
                     st.rerun()
                 if cols[2].button("🗑 Supprimer", key=f"del_{n['id']}"):
-                    c2 = get_conn()
-                    c2.execute("DELETE FROM notes WHERE id=?", (n['id'],))
-                    c2.commit()
-                    c2.close()
+                    delete_row_by_id('notes', int(n['id']))
                     st.rerun()
 
     st.subheader("➕ Ajouter une note")
     with st.form("new_note", clear_on_submit=True):
         c1, c2 = st.columns(2)
         auteur = c1.text_input("Auteur", value=st.session_state.get('last_auteur', ''))
-        action = c2.text_input("Type d'action", placeholder="ex: Appel, Mail, Relance 1...")
+        action = c2.text_input("Type d'action",
+                               placeholder="ex: Appel, Mail, Relance 1...")
         note = st.text_area("Note", height=100)
         c3, c4 = st.columns(2)
         echeance = c3.date_input("Échéance (optionnel)", value=None)
@@ -519,15 +836,18 @@ def page_notes():
         if st.form_submit_button("Enregistrer", type="primary"):
             if note.strip():
                 st.session_state['last_auteur'] = auteur
-                c = get_conn()
-                c.execute("""INSERT INTO notes
-                    (comp_aux_num, date_note, auteur, note, action, echeance, statut)
-                    VALUES (?,?,?,?,?,?,?)""",
-                          (comp_aux_num, datetime.now().strftime('%Y-%m-%d %H:%M'),
-                           auteur, note, action,
-                           echeance.isoformat() if echeance else None, statut))
-                c.commit()
-                c.close()
+                new_id = next_id(notes_df)
+                append_row('notes', {
+                    'id': new_id,
+                    'ref_client': info.get('ref_client', ''),
+                    'comp_aux_num': comp_aux_num,
+                    'date_note': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    'auteur': auteur,
+                    'note': note,
+                    'action': action,
+                    'echeance': echeance.isoformat() if echeance else '',
+                    'statut': statut,
+                })
                 st.success("Note enregistrée.")
                 st.rerun()
 
@@ -541,7 +861,8 @@ def _style_header(cell):
 def _autosize(ws):
     for col_cells in ws.columns:
         length = max((len(str(c.value or '')) for c in col_cells), default=10)
-        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(max(length + 2, 12), 40)
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = \
+            min(max(length + 2, 12), 40)
 
 
 def page_export():
@@ -549,32 +870,23 @@ def page_export():
 
     df = load_creances_enrichies(only_open=True)
     df = df[df['solde'] > 0.01]
-
     if df.empty:
         st.warning("Aucune créance à exporter.")
         return
 
-    conn = get_conn()
-    notes = pd.read_sql("""
-        SELECT n.*, d.client, d.commercial, d.agence
-        FROM notes n
-        LEFT JOIN mapping m ON n.comp_aux_num = m.comp_aux_num
-        LEFT JOIN dossiers d ON m.ref_client = d.ref_client
-        ORDER BY n.date_note DESC
-    """, conn)
-    last_notes = pd.read_sql("""
-        SELECT comp_aux_num,
-               MAX(date_note) as derniere_relance,
-               COUNT(*) as nb_relances
-        FROM notes GROUP BY comp_aux_num
-    """, conn)
-    conn.close()
+    notes = read_sheet('notes')
+    if not notes.empty:
+        last_notes = notes.groupby('comp_aux_num').agg(
+            derniere_relance=('date_note', 'max'),
+            nb_relances=('date_note', 'count')
+        ).reset_index()
+    else:
+        last_notes = pd.DataFrame(columns=['comp_aux_num', 'derniere_relance', 'nb_relances'])
 
     tab1, tab2 = st.tabs(["Export commerciaux", "Export Power BI"])
 
     with tab1:
-        st.markdown("Génère un classeur Excel avec une feuille par commercial, "
-                    "synthèse globale + historique des relances.")
+        st.markdown("Classeur Excel avec synthèse + une feuille par commercial + relances.")
         if st.button("🔧 Générer l'export commerciaux", type="primary"):
             wb = openpyxl.Workbook()
             wb.remove(wb.active)
@@ -604,7 +916,6 @@ def page_export():
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
             ws.cell(total_row, 7, f'=SUM(G2:G{total_row - 1})').font = Font(bold=True)
-            ws.cell(total_row, 7).number_format = '#,##0.00 €'
             for row in ws.iter_rows(min_row=2, max_row=total_row, min_col=7, max_col=7):
                 for c in row:
                     c.number_format = '#,##0.00 €'
@@ -612,10 +923,11 @@ def page_export():
             ws.freeze_panes = 'A2'
 
             for com in sorted(df['commercial'].dropna().unique()):
-                df_c = df[df['commercial'] == com].sort_values(
-                    ['comp_aux_lib', 'ecriture_date'])
-                safe_name = com[:31].replace('/', '-').replace('\\', '-')
-                ws = wb.create_sheet(safe_name)
+                if not com:
+                    continue
+                df_c = df[df['commercial'] == com].sort_values(['comp_aux_lib', 'ecriture_date'])
+                safe = com[:31].replace('/', '-').replace('\\', '-')
+                ws = wb.create_sheet(safe)
                 headers = ['Client', 'Ref dossier', 'Réf. pièce', 'Date', 'Journal',
                            'Libellé', 'Débit', 'Crédit', 'Solde', 'Agence', 'État']
                 ws.append(headers)
@@ -635,12 +947,11 @@ def page_export():
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
-            non_map = df[df['commercial'].isna() | (df['commercial'] == '')]
+            non_map = df[df['commercial'].fillna('') == '']
             if not non_map.empty:
                 ws = wb.create_sheet("Non rattachés")
-                headers = ['Client FEC', 'Code compta', 'Réf. pièce', 'Date',
-                           'Libellé', 'Solde']
-                ws.append(headers)
+                ws.append(['Client FEC', 'Code compta', 'Réf. pièce', 'Date',
+                           'Libellé', 'Solde'])
                 for c in ws[1]:
                     _style_header(c)
                 for _, r in non_map.iterrows():
@@ -650,21 +961,17 @@ def page_export():
 
             if not notes.empty:
                 ws = wb.create_sheet("Relances")
-                headers = ['Date', 'Client', 'Commercial', 'Agence', 'Auteur',
-                           'Action', 'Note', 'Échéance', 'Statut']
-                ws.append(headers)
+                ws.append(['Date', 'Client', 'Auteur', 'Action', 'Note', 'Échéance', 'Statut'])
                 for c in ws[1]:
                     _style_header(c)
                 for _, r in notes.iterrows():
-                    ws.append([r['date_note'], r['client'] or r['comp_aux_num'],
-                               r['commercial'], r['agence'], r['auteur'],
+                    ws.append([r['date_note'], r['comp_aux_num'], r['auteur'],
                                r['action'], r['note'], r['echeance'], r['statut']])
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
             buf = io.BytesIO()
             wb.save(buf)
-            buf.seek(0)
             st.download_button(
                 "📥 Télécharger (relances_commerciaux.xlsx)",
                 data=buf.getvalue(),
@@ -673,7 +980,7 @@ def page_export():
             )
 
     with tab2:
-        st.markdown("Dataset plat pour Power BI : une ligne par écriture, enrichie avec les infos dossier.")
+        st.markdown("Dataset plat pour Power BI avec tranches d'âge et dernière relance.")
         if st.button("🔧 Générer l'export Power BI", type="primary"):
             pbi = df.copy()
             pbi['ecriture_date'] = pd.to_datetime(pbi['ecriture_date'], errors='coerce')
@@ -695,22 +1002,15 @@ def page_export():
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='openpyxl') as wr:
                 pbi.to_excel(wr, index=False, sheet_name='Creances')
-                conn = get_conn()
-                pd.read_sql("SELECT * FROM dossiers", conn).to_excel(
-                    wr, index=False, sheet_name='Dossiers')
-                pd.read_sql("SELECT * FROM notes", conn).to_excel(
-                    wr, index=False, sheet_name='Notes')
-                conn.close()
-            out.seek(0)
+                read_sheet('dossiers').to_excel(wr, index=False, sheet_name='Dossiers')
+                read_sheet('notes').to_excel(wr, index=False, sheet_name='Notes')
             st.download_button(
                 "📥 Télécharger (export_powerbi.xlsx)",
                 data=out.getvalue(),
                 file_name=f"creances_powerbi_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            st.caption("💡 Dans Power BI : Obtenir les données → Excel → charger les 3 feuilles. "
-                       "Relations : Creances.comp_aux_num ↔ Notes.comp_aux_num, "
-                       "Creances.ref_client ↔ Dossiers.ref_client")
+            st.caption("💡 Power BI : Obtenir les données → Excel → charger les 3 feuilles.")
 
 
 # ============================================================
@@ -723,20 +1023,41 @@ PAGES = {
     "📤 Export": page_export,
 }
 
+# Check config before any page
+ok, msg = check_config()
+if not ok:
+    st.error(f"❌ Configuration manquante : {msg}")
+    st.info("""
+    **Pour configurer l'app localement :**
+
+    1. Créez le fichier `.streamlit/secrets.toml` dans le dossier du projet
+    2. Ajoutez le contenu de votre `google_credentials.json` au bon format
+    3. Voir le fichier `.streamlit/secrets.toml.example` pour le modèle
+
+    **Pour Streamlit Cloud :**
+    Configurez les secrets dans l'interface (Settings → Secrets).
+    """)
+    st.stop()
+
 with st.sidebar:
     st.title("💼 Suivi Créances")
     st.caption("DCA — Suivi clients")
     st.divider()
     page = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
     st.divider()
-    conn = get_conn()
-    n_ouv = conn.execute("""SELECT COUNT(DISTINCT comp_aux_num) FROM creances
-        WHERE (ecriture_let IS NULL OR ecriture_let = '')
-        AND (debit - credit) > 0""").fetchone()[0]
-    total_ouv = conn.execute("""SELECT COALESCE(SUM(debit - credit), 0) FROM creances
-        WHERE (ecriture_let IS NULL OR ecriture_let = '')""").fetchone()[0] or 0
-    conn.close()
-    st.metric("Clients en créance", n_ouv)
-    st.metric("Total dû", f"{total_ouv:,.0f} €".replace(",", " "))
+
+    df_c = read_sheet('creances')
+    if not df_c.empty:
+        df_c['debit'] = pd.to_numeric(df_c['debit'], errors='coerce').fillna(0)
+        df_c['credit'] = pd.to_numeric(df_c['credit'], errors='coerce').fillna(0)
+        df_c['solde'] = df_c['debit'] - df_c['credit']
+        mask = ((df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')) & (df_c['solde'] > 0)
+        open_df = df_c[mask]
+        st.metric("Clients en créance", open_df['comp_aux_num'].nunique())
+        st.metric("Total dû", f"{open_df['solde'].sum():,.0f} €".replace(",", " "))
+
+    if st.button("🔄 Rafraîchir les données"):
+        clear_cache()
+        st.rerun()
 
 PAGES[page]()
