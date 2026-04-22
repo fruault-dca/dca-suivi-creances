@@ -379,14 +379,34 @@ def page_import():
                     with st.spinner("Analyse du CRM et écriture dans Google Sheets..."):
                         data = parse_crm(crm_file.getvalue(), sheet_name=sheet)
 
+                        # Lookup tolérant aux accents/casse/espaces
+                        import unicodedata as _ud, re as _re3
+                        def _norm_col(s):
+                            s = str(s).strip().lower()
+                            s = _ud.normalize('NFKD', s).encode('ascii', 'ignore').decode()
+                            return _re3.sub(r'[^a-z0-9]+', '', s)
+                        _col_lookup = {_norm_col(c): c for c in data.columns}
+
                         def g(row, col):
-                            return to_str(row.get(col, ''))
+                            key = _norm_col(col)
+                            actual = _col_lookup.get(key)
+                            if actual is None:
+                                return ''
+                            return to_str(row.get(actual, ''))
 
                         def gf(row, col):
-                            v = row.get(col, '')
+                            key = _norm_col(col)
+                            actual = _col_lookup.get(key)
+                            if actual is None:
+                                return ''
+                            v = row.get(actual, '')
                             if pd.isna(v) or str(v).lower() == 'nan' or str(v).strip() == '':
                                 return ''
                             return to_float(v)
+
+                        # Debug : affiche les colonnes détectées
+                        with st.expander("🔍 Colonnes détectées dans le fichier CRM"):
+                            st.write(list(data.columns))
 
                         rows = []
                         for _, r in data.iterrows():
