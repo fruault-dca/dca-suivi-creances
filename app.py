@@ -247,6 +247,34 @@ def load_creances_enrichies(only_open=True):
     if only_open:
         df_c = df_c[(df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')]
 
+        # Auto-rapprochement non-lettré : pour chaque (client, piece_ref),
+        # si la somme débit - crédit ≈ 0, la facture est soldée → on la retire.
+        # Sinon on garde une ligne unique avec le solde net, en agrégeant les infos.
+        if not df_c.empty and 'piece_ref' in df_c.columns:
+            # On ne rapproche que les lignes qui ont une piece_ref
+            has_ref = df_c['piece_ref'].astype(str).str.strip() != ''
+            with_ref = df_c[has_ref].copy()
+            without_ref = df_c[~has_ref].copy()
+
+            if not with_ref.empty:
+                # Solde net par (client, facture)
+                nets = with_ref.groupby(['comp_aux_num', 'piece_ref'])['solde'] \
+                    .sum().reset_index().rename(columns={'solde': 'solde_net'})
+                with_ref = with_ref.merge(nets, on=['comp_aux_num', 'piece_ref'], how='left')
+
+                # Filtre : on retire les factures totalement soldées (solde net ≈ 0)
+                with_ref = with_ref[with_ref['solde_net'].abs() > 0.01]
+
+                # On garde la ligne de débit la plus ancienne (= la facture d'origine)
+                # et on remplace son solde par le solde net de la facture
+                with_ref = with_ref.sort_values(['comp_aux_num', 'piece_ref', 'debit'],
+                                                ascending=[True, True, False])
+                with_ref = with_ref.drop_duplicates(['comp_aux_num', 'piece_ref'], keep='first')
+                with_ref['solde'] = with_ref['solde_net']
+                with_ref = with_ref.drop(columns=['solde_net'])
+
+            df_c = pd.concat([with_ref, without_ref], ignore_index=True)
+
     if not df_m.empty and 'piece_ref' in df_m.columns:
         # Normalise piece_ref des deux côtés (enlève zéros de tête sur chaque segment)
         # pour matcher FEC "22/1" avec PROGEMI "22/0000001"
