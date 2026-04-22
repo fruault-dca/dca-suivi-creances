@@ -76,17 +76,19 @@ def _with_retry(fn, *args, **kwargs):
     raise APIError({"error": {"message": "Quota Google Sheets dépassé après 5 tentatives"}})
 
 
+@st.cache_resource
 def ensure_headers():
-    """Écrit les en-têtes dans chaque onglet si absentes."""
+    """Écrit les en-têtes dans chaque onglet si absentes. Une seule fois par session."""
     ss = get_spreadsheet()
-    existing_sheets = {s.title for s in ss.worksheets()}
+    existing_sheets = {s.title for s in _with_retry(ss.worksheets)}
     for sheet_name, headers in HEADERS.items():
         if sheet_name not in existing_sheets:
-            ss.add_worksheet(title=sheet_name, rows=100, cols=len(headers))
+            _with_retry(ss.add_worksheet, title=sheet_name, rows=100, cols=len(headers))
         ws = ss.worksheet(sheet_name)
-        first_row = ws.row_values(1)
+        first_row = _with_retry(ws.row_values, 1)
         if first_row != headers:
-            ws.update(values=[headers], range_name='A1')
+            _with_retry(ws.update, values=[headers], range_name='A1')
+    return True
 
 
 @st.cache_data(ttl=600, show_spinner=False)
