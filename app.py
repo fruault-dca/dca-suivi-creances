@@ -30,7 +30,7 @@ HEADERS = {
                  'import_date'],
     'dossiers': ['ref_client', 'code_affaire', 'client', 'email1', 'email2',
                  'type_projet', 'adresse', 'cp', 'ville', 'constructeur',
-                 'agence', 'commercial', 'etat', 'stade', 'type_contrat',
+                 'agence', 'commercial', 'conducteur', 'etat', 'stade', 'type_contrat',
                  'contrat_ht', 'contrat_ttc', 'contrat_rev_ht', 'contrat_rev_ttc',
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
     'mapping': ['piece_ref', 'ref_client', 'comp_aux_num'],
@@ -312,12 +312,12 @@ def load_creances_enrichies(only_open=True):
         df_c['ref_client'] = ''
 
     if not df_d.empty:
-        dos_cols = ['ref_client', 'client', 'commercial', 'agence', 'etat',
+        dos_cols = ['ref_client', 'client', 'commercial', 'conducteur', 'agence', 'etat',
                     'stade', 'contrat_ttc', 'date_reception']
         df_d_small = df_d[[c for c in dos_cols if c in df_d.columns]]
         df_c = df_c.merge(df_d_small, on='ref_client', how='left')
     else:
-        for col in ['client', 'commercial', 'agence', 'etat', 'stade',
+        for col in ['client', 'commercial', 'conducteur', 'agence', 'etat', 'stade',
                     'contrat_ttc', 'date_reception']:
             df_c[col] = ''
 
@@ -406,6 +406,7 @@ def page_import():
                                 'constructeur': g(r, 'Constructeur'),
                                 'agence': g(r, 'Agence'),
                                 'commercial': g(r, 'Commercial'),
+                                'conducteur': g(r, 'Conducteur de travaux'),
                                 'etat': g(r, 'Etat'),
                                 'stade': g(r, "Stade d'avancement"),
                                 'type_contrat': g(r, 'Type de contrat'),
@@ -743,18 +744,25 @@ def page_creances():
 
     df = df[df['solde'].abs() > 0.01]
 
-    c1, c2, c3, c4 = st.columns(4)
+    if 'conducteur' not in df.columns:
+        df['conducteur'] = ''
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     coms = ['(Tous)'] + sorted([c for c in df['commercial'].dropna().unique() if c])
     filt_com = c1.selectbox("Commercial", coms)
+    conds = ['(Tous)'] + sorted([c for c in df['conducteur'].dropna().unique() if c])
+    filt_cond = c2.selectbox("Conducteur", conds)
     ags = ['(Toutes)'] + sorted([a for a in df['agence'].dropna().unique() if a])
-    filt_ag = c2.selectbox("Agence", ags)
+    filt_ag = c3.selectbox("Agence", ags)
     etats = ['(Tous)'] + sorted([e for e in df['etat'].dropna().unique() if e])
-    filt_et = c3.selectbox("État dossier", etats)
-    seuil = c4.number_input("Solde mini (€)", value=0, step=500)
+    filt_et = c4.selectbox("État dossier", etats)
+    seuil = c5.number_input("Solde mini (€)", value=0, step=500)
 
     f = df.copy()
     if filt_com != '(Tous)':
         f = f[f['commercial'] == filt_com]
+    if filt_cond != '(Tous)':
+        f = f[f['conducteur'] == filt_cond]
     if filt_ag != '(Toutes)':
         f = f[f['agence'] == filt_ag]
     if filt_et != '(Tous)':
@@ -774,7 +782,7 @@ def page_creances():
 
     st.subheader("Synthèse par client")
     synth = f.groupby(['comp_aux_num', 'comp_aux_lib', 'ref_client', 'client',
-                       'commercial', 'agence', 'etat'], dropna=False).agg(
+                       'commercial', 'conducteur', 'agence', 'etat'], dropna=False).agg(
         solde=('solde', 'sum'),
         nb=('piece_ref', 'count'),
         derniere_ecriture=('ecriture_date', 'max')
@@ -784,7 +792,8 @@ def page_creances():
         synth.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
             'ref_client': 'Ref dossier', 'client': 'Client CRM',
-            'commercial': 'Commercial', 'agence': 'Agence',
+            'commercial': 'Commercial', 'conducteur': 'Conducteur',
+            'agence': 'Agence',
             'etat': 'État', 'solde': 'Solde (€)',
             'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture'
         }),
@@ -1111,15 +1120,12 @@ with st.sidebar:
     page = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
     st.divider()
 
-    df_c = read_sheet('creances')
-    if not df_c.empty:
-        df_c['debit'] = pd.to_numeric(df_c['debit'], errors='coerce').fillna(0)
-        df_c['credit'] = pd.to_numeric(df_c['credit'], errors='coerce').fillna(0)
-        df_c['solde'] = df_c['debit'] - df_c['credit']
-        mask = ((df_c['ecriture_let'].isna()) | (df_c['ecriture_let'] == '')) & (df_c['solde'] > 0)
-        open_df = df_c[mask]
-        st.metric("Clients en créance", open_df['comp_aux_num'].nunique())
-        st.metric("Total dû", f"{open_df['solde'].sum():,.0f} €".replace(",", " "))
+    # Utilise les créances rapprochées (cohérent avec la page Créances)
+    _df_side = load_creances_enrichies(only_open=True)
+    if not _df_side.empty:
+        _df_side = _df_side[_df_side['solde'].abs() > 0.01]
+        st.metric("Clients en créance", _df_side['comp_aux_num'].nunique())
+        st.metric("Total dû", f"{_df_side['solde'].sum():,.0f} €".replace(",", " "))
 
     if st.button("🔄 Rafraîchir les données"):
         clear_cache()
