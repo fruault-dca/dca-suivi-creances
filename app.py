@@ -36,6 +36,8 @@ HEADERS = {
     'mapping': ['piece_ref', 'ref_client', 'comp_aux_num'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
               'action', 'echeance', 'statut'],
+    'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
+                    'date_passage', 'commentaire'],
 }
 
 
@@ -326,6 +328,24 @@ def load_creances_enrichies(only_open=True):
     df_c.loc[mask_hors, 'ref_client'] = 'Hors CRM'
     df_c.loc[mask_hors, 'client'] = df_c.loc[mask_hors, 'comp_aux_lib']
 
+    # Calcul des jours de retard (aujourd'hui - date d'écriture)
+    today = pd.Timestamp(datetime.now().date())
+    df_c['_dt'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
+    df_c['jours_retard'] = (today - df_c['_dt']).dt.days
+    df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
+    df_c = df_c.drop(columns=['_dt'])
+
+    # Flag contentieux + responsable
+    df_ct = read_sheet('contentieux')
+    if not df_ct.empty and 'ref_client' in df_ct.columns:
+        df_ct_small = df_ct[['ref_client', 'responsable']].drop_duplicates('ref_client')
+        df_c = df_c.merge(df_ct_small, on='ref_client', how='left')
+        df_c['contentieux'] = df_c['responsable'].notna() & (df_c['responsable'] != '')
+        df_c['responsable'] = df_c['responsable'].fillna('')
+    else:
+        df_c['contentieux'] = False
+        df_c['responsable'] = ''
+
     return df_c.sort_values('solde', ascending=False)
 
 
@@ -335,7 +355,8 @@ def load_creances_enrichies(only_open=True):
 def page_import():
     st.header("📥 Import des données")
 
-    tab1, tab2, tab3 = st.tabs(["FEC", "CRM (Chantiers)", "Mapping factures"])
+    tab1, tab2, tab3, tab4 = st.tabs(["FEC", "CRM (Chantiers)",
+                                       "Mapping factures", "Contentieux"])
 
     with tab1:
         st.markdown("**Import du Fichier d'Écritures Comptables**")
@@ -739,6 +760,94 @@ def page_import():
                             replace_sheet('mapping', df_m_cleaned)
                             st.rerun()
 
+    with tab4:
+        st.markdown("**Gestion des dossiers en contentieux**")
+        st.caption("Les dossiers listés ici sont exclus de l'export commerciaux "
+                   "et apparaissent dans un export dédié.")
+
+        df_ct = read_sheet('contentieux')
+        df_d_ct = read_sheet('dossiers')
+        df_c_ct = read_sheet('creances')
+
+        # --- Formulaire d'ajout ---
+        st.markdown("### Ajouter un dossier au contentieux")
+
+        # Construit la liste des dossiers disponibles (CRM + clients FEC sans dossier)
+        already = set(df_ct['ref_client'].tolist()) if not df_ct.empty else set()
+
+        options_add_labels = ["— Choisir un dossier —"]
+        options_add_vals = [None]
+
+        if not df_d_ct.empty:
+            for _, r in df_d_ct.iterrows():
+                if r['ref_client'] and r['ref_client'] not in already:
+                    options_add_labels.append(
+                        f"CRM — {r['ref_client']} — {r['client']}")
+                    options_add_vals.append({
+                        'ref_client': r['ref_client'],
+                        'comp_aux_num': '',
+                    })
+
+        # Permet aussi d'ajouter un client FEC sans dossier CRM (via comp_aux_num)
+        if not df_c_ct.empty:
+            clients_fec = df_c_ct[['comp_aux_num', 'comp_aux_lib']] \
+                .drop_duplicates('comp_aux_num')
+            for _, r in clients_fec.iterrows():
+                label = f"FEC — {r['comp_aux_num']} — {r['comp_aux_lib']}"
+                key_val = f"FEC:{r['comp_aux_num']}"
+                if key_val not in already:
+                    options_add_labels.append(label)
+                    options_add_vals.append({
+                        'ref_client': key_val,
+                        'comp_aux_num': r['comp_aux_num'],
+                    })
+
+        c_a, c_b, c_c = st.columns([3, 2, 3])
+        idx_sel = c_a.selectbox("Dossier", range(len(options_add_labels)),
+                                format_func=lambda i: options_add_labels[i],
+                                key="ct_add_dossier")
+        resp = c_b.text_input("Responsable", key="ct_add_resp",
+                              placeholder="Nom du gestionnaire")
+        comm = c_c.text_input("Commentaire", key="ct_add_comm",
+                              placeholder="Facultatif")
+
+        if st.button("➕ Ajouter au contentieux", type="primary"):
+            if idx_sel == 0:
+                st.warning("Sélectionnez un dossier.")
+            elif not resp.strip():
+                st.warning("Le responsable est obligatoire.")
+            else:
+                payload = options_add_vals[idx_sel]
+                new_row = pd.DataFrame([{
+                    'ref_client': payload['ref_client'],
+                    'comp_aux_num': payload['comp_aux_num'],
+                    'responsable': resp.strip(),
+                    'date_passage': datetime.now().date().isoformat(),
+                    'commentaire': comm.strip(),
+                }])
+                merged = pd.concat([df_ct, new_row], ignore_index=True) \
+                    if not df_ct.empty else new_row
+                replace_sheet('contentieux', merged)
+                st.success("✅ Ajouté au contentieux.")
+                st.rerun()
+
+        # --- Liste des dossiers en contentieux ---
+        st.markdown("### Dossiers actuellement en contentieux")
+        if df_ct.empty:
+            st.info("Aucun dossier en contentieux.")
+        else:
+            st.caption(f"{len(df_ct)} dossier(s)")
+            for i, r in df_ct.iterrows():
+                cc1, cc2, cc3, cc4 = st.columns([3, 2, 3, 1])
+                cc1.write(f"**{r['ref_client']}**")
+                cc1.caption(f"Passage : {r['date_passage']}")
+                cc2.write(f"👤 {r['responsable']}")
+                cc3.caption(r.get('commentaire', '') or '—')
+                if cc4.button("🗑️", key=f"del_ct_{i}", help="Retirer du contentieux"):
+                    df_ct_cleaned = df_ct.drop(index=i).reset_index(drop=True)
+                    replace_sheet('contentieux', df_ct_cleaned)
+                    st.rerun()
+
     st.divider()
     df_c = read_sheet('creances')
     df_d = read_sheet('dossiers')
@@ -789,6 +898,10 @@ def page_creances():
         f = f[f['etat'] == filt_et]
     f = f[f['solde'] >= seuil]
 
+    # Sépare les dossiers en contentieux du reste
+    f_contentieux = f[f['contentieux']].copy() if 'contentieux' in f.columns else pd.DataFrame()
+    f = f[~f['contentieux']] if 'contentieux' in f.columns else f
+
     total = f['solde'].sum()
     nb_cli = f['comp_aux_num'].nunique()
     nb_mappes = f['ref_client'].fillna('').astype(bool).sum()
@@ -805,21 +918,65 @@ def page_creances():
                        'commercial', 'conducteur', 'agence', 'etat'], dropna=False).agg(
         solde=('solde', 'sum'),
         nb=('piece_ref', 'count'),
-        derniere_ecriture=('ecriture_date', 'max')
+        derniere_ecriture=('ecriture_date', 'max'),
+        jours_retard=('jours_retard', 'max')
     ).reset_index().sort_values('solde', ascending=False)
 
-    st.dataframe(
-        synth.rename(columns={
+    # Coloration conditionnelle jours de retard : vert <7, orange 7-29, rouge >=30
+    def _color_retard(v):
+        try:
+            v = int(v)
+        except Exception:
+            return ''
+        if v <= 0:
+            return ''
+        if v < 7:
+            return 'background-color: #C8E6C9; color: #1B5E20;'  # vert
+        if v < 30:
+            return 'background-color: #FFE0B2; color: #E65100;'  # orange
+        return 'background-color: #FFCDD2; color: #B71C1C;'  # rouge
+
+    synth_display = synth.rename(columns={
+        'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
+        'ref_client': 'Ref dossier', 'client': 'Client CRM',
+        'commercial': 'Commercial', 'conducteur': 'Conducteur',
+        'agence': 'Agence',
+        'etat': 'État', 'solde': 'Solde (€)',
+        'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
+        'jours_retard': 'Jours retard'
+    })
+    styled = synth_display.style.map(_color_retard, subset=['Jours retard']) \
+        .format({'Solde (€)': '{:.2f}'})
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Sous-tableau Contentieux
+    if not f_contentieux.empty:
+        st.subheader("⚖️ Dossiers en contentieux")
+        synth_ct = f_contentieux.groupby(
+            ['comp_aux_num', 'comp_aux_lib', 'ref_client', 'client',
+             'responsable', 'commercial', 'agence'], dropna=False).agg(
+            solde=('solde', 'sum'),
+            nb=('piece_ref', 'count'),
+            derniere_ecriture=('ecriture_date', 'max'),
+            jours_retard=('jours_retard', 'max')
+        ).reset_index().sort_values('solde', ascending=False)
+
+        total_ct = synth_ct['solde'].sum()
+        st.caption(f"**Total contentieux : {total_ct:,.0f} €**".replace(",", " ")
+                   + f" — {len(synth_ct)} dossier(s)")
+
+        synth_ct_display = synth_ct.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
             'ref_client': 'Ref dossier', 'client': 'Client CRM',
-            'commercial': 'Commercial', 'conducteur': 'Conducteur',
-            'agence': 'Agence',
-            'etat': 'État', 'solde': 'Solde (€)',
-            'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture'
-        }),
-        use_container_width=True, hide_index=True,
-        column_config={'Solde (€)': st.column_config.NumberColumn(format="%.2f")}
-    )
+            'responsable': 'Responsable',
+            'commercial': 'Commercial', 'agence': 'Agence',
+            'solde': 'Solde (€)', 'nb': 'Nb lignes',
+            'derniere_ecriture': 'Dernière écriture',
+            'jours_retard': 'Jours retard'
+        })
+        styled_ct = synth_ct_display.style.map(_color_retard, subset=['Jours retard']) \
+            .format({'Solde (€)': '{:.2f}'})
+        st.dataframe(styled_ct, use_container_width=True, hide_index=True)
 
     with st.expander("Détail ligne par ligne"):
         st.dataframe(
@@ -977,10 +1134,21 @@ def page_export():
     else:
         last_notes = pd.DataFrame(columns=['comp_aux_num', 'derniere_relance', 'nb_relances'])
 
-    tab1, tab2 = st.tabs(["Export commerciaux", "Export Power BI"])
+    # Sépare contentieux avant exports
+    df_all = df.copy()
+    df_ctx = df_all[df_all.get('contentieux', False)] if 'contentieux' in df_all.columns \
+        else pd.DataFrame()
+    df = df_all[~df_all.get('contentieux', False)] if 'contentieux' in df_all.columns \
+        else df_all
+
+    tab1, tab2, tab3 = st.tabs(["Export commerciaux", "Export Power BI",
+                                 "Export Contentieux"])
 
     with tab1:
         st.markdown("Classeur Excel avec synthèse + une feuille par commercial + relances.")
+        if not df_ctx.empty:
+            st.caption(f"ℹ️ {df_ctx['ref_client'].nunique()} dossier(s) en contentieux "
+                       f"exclu(s) de cet export.")
         if st.button("🔧 Générer l'export commerciaux", type="primary"):
             wb = openpyxl.Workbook()
             wb.remove(wb.active)
@@ -1105,6 +1273,95 @@ def page_export():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.caption("💡 Power BI : Obtenir les données → Excel → charger les 3 feuilles.")
+
+    with tab3:
+        st.markdown("Export des dossiers en contentieux groupés par responsable.")
+        if df_ctx.empty:
+            st.info("Aucun dossier en contentieux. Ajoutez-les dans "
+                    "Import → Contentieux.")
+        else:
+            st.caption(f"{df_ctx['ref_client'].nunique()} dossier(s) — "
+                       f"total {df_ctx['solde'].sum():,.0f} €".replace(",", " "))
+            if st.button("🔧 Générer l'export contentieux", type="primary"):
+                wb = openpyxl.Workbook()
+                wb.remove(wb.active)
+
+                # Feuille de synthèse
+                ws = wb.create_sheet("Synthèse")
+                headers = ['Responsable', 'Client FEC', 'Ref dossier', 'Client CRM',
+                           'Commercial', 'Agence', 'Solde (€)', 'Nb factures',
+                           'Jours retard max', 'Dernière écriture']
+                ws.append(headers)
+                for c in ws[1]:
+                    _style_header(c)
+
+                synth_ct = df_ctx.groupby(
+                    ['responsable', 'comp_aux_lib', 'ref_client', 'client',
+                     'commercial', 'agence'], dropna=False).agg(
+                    solde=('solde', 'sum'),
+                    nb=('piece_ref', 'count'),
+                    jours=('jours_retard', 'max'),
+                    derniere=('ecriture_date', 'max')
+                ).reset_index().sort_values(['responsable', 'solde'],
+                                             ascending=[True, False])
+
+                for _, r in synth_ct.iterrows():
+                    ws.append([r['responsable'], r['comp_aux_lib'], r['ref_client'],
+                               r['client'], r['commercial'], r['agence'],
+                               round(r['solde'], 2), r['nb'],
+                               int(r['jours']) if pd.notna(r['jours']) else '',
+                               r['derniere']])
+
+                total_row = ws.max_row + 1
+                ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
+                ws.cell(total_row, 7, f'=SUM(G2:G{total_row - 1})').font = Font(bold=True)
+                for row in ws.iter_rows(min_row=2, max_row=total_row,
+                                         min_col=7, max_col=7):
+                    for c in row:
+                        c.number_format = '#,##0.00 €'
+                _autosize(ws)
+                ws.freeze_panes = 'A2'
+
+                # Une feuille par responsable
+                for resp in sorted(df_ctx['responsable'].dropna().unique()):
+                    if not resp:
+                        continue
+                    df_r = df_ctx[df_ctx['responsable'] == resp] \
+                        .sort_values(['comp_aux_lib', 'ecriture_date'])
+                    safe = resp[:31].replace('/', '-').replace('\\', '-')
+                    ws = wb.create_sheet(safe)
+                    headers = ['Client', 'Ref dossier', 'Réf. pièce', 'Date',
+                               'Journal', 'Libellé', 'Débit', 'Crédit', 'Solde',
+                               'Jours retard', 'Commercial', 'Agence']
+                    ws.append(headers)
+                    for c in ws[1]:
+                        _style_header(c)
+                    for _, r in df_r.iterrows():
+                        ws.append([r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
+                                   r['ecriture_date'], r['journal_code'],
+                                   r['ecriture_lib'],
+                                   round(r['debit'], 2), round(r['credit'], 2),
+                                   round(r['solde'], 2),
+                                   int(r.get('jours_retard', 0) or 0),
+                                   r['commercial'], r['agence']])
+                    last = ws.max_row + 1
+                    ws.cell(last, 1, 'TOTAL').font = Font(bold=True)
+                    ws.cell(last, 9, f'=SUM(I2:I{last - 1})').font = Font(bold=True)
+                    for row in ws.iter_rows(min_row=2, max_row=last,
+                                             min_col=7, max_col=9):
+                        for c in row:
+                            c.number_format = '#,##0.00 €'
+                    _autosize(ws)
+                    ws.freeze_panes = 'A2'
+
+                buf = io.BytesIO()
+                wb.save(buf)
+                st.download_button(
+                    "📥 Télécharger (export_contentieux.xlsx)",
+                    data=buf.getvalue(),
+                    file_name=f"contentieux_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 
 # ============================================================
