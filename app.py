@@ -35,9 +35,10 @@ HEADERS = {
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
     'mapping': ['piece_ref', 'ref_client', 'comp_aux_num', 'date_facture'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
-              'action', 'echeance', 'statut'],
+              'note_resume', 'action', 'echeance', 'statut'],
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
-                    'date_passage', 'commentaire'],
+                    'date_passage', 'commentaire',
+                    'provision_risque', 'provision_creances_douteuses'],
 }
 
 
@@ -353,16 +354,31 @@ def load_creances_enrichies(only_open=True):
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
     df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
-    # Flag contentieux + responsable
+    # Flag contentieux + responsable + provisions
     df_ct = read_sheet('contentieux')
     if not df_ct.empty and 'ref_client' in df_ct.columns:
-        df_ct_small = df_ct[['ref_client', 'responsable']].drop_duplicates('ref_client')
+        ct_cols = ['ref_client', 'responsable']
+        for col in ['provision_risque', 'provision_creances_douteuses']:
+            if col in df_ct.columns:
+                ct_cols.append(col)
+        df_ct_small = df_ct[ct_cols].drop_duplicates('ref_client')
+        # Cast provisions en numérique
+        for col in ['provision_risque', 'provision_creances_douteuses']:
+            if col in df_ct_small.columns:
+                df_ct_small[col] = pd.to_numeric(df_ct_small[col], errors='coerce').fillna(0)
         df_c = df_c.merge(df_ct_small, on='ref_client', how='left')
         df_c['contentieux'] = df_c['responsable'].notna() & (df_c['responsable'] != '')
         df_c['responsable'] = df_c['responsable'].fillna('')
+        for col in ['provision_risque', 'provision_creances_douteuses']:
+            if col in df_c.columns:
+                df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0)
+            else:
+                df_c[col] = 0
     else:
         df_c['contentieux'] = False
         df_c['responsable'] = ''
+        df_c['provision_risque'] = 0
+        df_c['provision_creances_douteuses'] = 0
 
     return df_c.sort_values('solde', ascending=False)
 
@@ -847,6 +863,14 @@ def page_import():
         comm = c_c.text_input("Commentaire", key="ct_add_comm",
                               placeholder="Facultatif")
 
+        c_d, c_e = st.columns(2)
+        prov_r = c_d.number_input("Provision pour risque (€)",
+                                  min_value=0.0, step=100.0, value=0.0,
+                                  key="ct_add_prov_r")
+        prov_cd = c_e.number_input("Provision créances douteuses (€)",
+                                   min_value=0.0, step=100.0, value=0.0,
+                                   key="ct_add_prov_cd")
+
         if st.button("➕ Ajouter au contentieux", type="primary"):
             if idx_sel == 0:
                 st.warning("Sélectionnez un dossier.")
@@ -860,6 +884,8 @@ def page_import():
                     'responsable': resp.strip(),
                     'date_passage': datetime.now().date().isoformat(),
                     'commentaire': comm.strip(),
+                    'provision_risque': prov_r,
+                    'provision_creances_douteuses': prov_cd,
                 }])
                 merged = pd.concat([df_ct, new_row], ignore_index=True) \
                     if not df_ct.empty else new_row
@@ -867,19 +893,56 @@ def page_import():
                 st.success("✅ Ajouté au contentieux.")
                 st.rerun()
 
-        # --- Liste des dossiers en contentieux ---
+        # --- Liste des dossiers en contentieux (édition provisions) ---
         st.markdown("### Dossiers actuellement en contentieux")
         if df_ct.empty:
             st.info("Aucun dossier en contentieux.")
         else:
-            st.caption(f"{len(df_ct)} dossier(s)")
+            st.caption(f"{len(df_ct)} dossier(s) — éditez les provisions ci-dessous puis "
+                       "cliquez **Enregistrer**.")
+
+            # Forme un dataframe éditable
+            df_ct_edit = df_ct.copy()
+            for col in ['provision_risque', 'provision_creances_douteuses']:
+                if col not in df_ct_edit.columns:
+                    df_ct_edit[col] = 0
+                df_ct_edit[col] = pd.to_numeric(df_ct_edit[col], errors='coerce').fillna(0)
+
+            edited = st.data_editor(
+                df_ct_edit[['ref_client', 'responsable', 'date_passage',
+                            'commentaire', 'provision_risque',
+                            'provision_creances_douteuses']],
+                column_config={
+                    'ref_client': st.column_config.TextColumn('Dossier', disabled=True),
+                    'responsable': st.column_config.TextColumn('Responsable'),
+                    'date_passage': st.column_config.TextColumn('Date passage', disabled=True),
+                    'commentaire': st.column_config.TextColumn('Commentaire'),
+                    'provision_risque': st.column_config.NumberColumn(
+                        'Prov. risque (€)', min_value=0, step=100, format="%.2f"),
+                    'provision_creances_douteuses': st.column_config.NumberColumn(
+                        'Prov. créances douteuses (€)',
+                        min_value=0, step=100, format="%.2f"),
+                },
+                use_container_width=True, hide_index=True, key="ct_editor",
+                num_rows="fixed",
+            )
+
+            colb1, colb2 = st.columns([1, 5])
+            if colb1.button("💾 Enregistrer", type="primary"):
+                # Réinjecte les valeurs éditées dans df_ct (en gardant comp_aux_num)
+                df_ct_new = df_ct.copy()
+                for c in ['responsable', 'commentaire', 'provision_risque',
+                          'provision_creances_douteuses']:
+                    df_ct_new[c] = edited[c].values
+                replace_sheet('contentieux', df_ct_new)
+                st.success("✅ Modifications enregistrées.")
+                st.rerun()
+
+            st.markdown("**Retirer un dossier du contentieux :**")
             for i, r in df_ct.iterrows():
-                cc1, cc2, cc3, cc4 = st.columns([3, 2, 3, 1])
-                cc1.write(f"**{r['ref_client']}**")
-                cc1.caption(f"Passage : {r['date_passage']}")
-                cc2.write(f"👤 {r['responsable']}")
-                cc3.caption(r.get('commentaire', '') or '—')
-                if cc4.button("🗑️", key=f"del_ct_{i}", help="Retirer du contentieux"):
+                cc1, cc2 = st.columns([5, 1])
+                cc1.write(f"{r['ref_client']} — 👤 {r['responsable']}")
+                if cc2.button("🗑️", key=f"del_ct_{i}", help="Retirer du contentieux"):
                     df_ct_cleaned = df_ct.drop(index=i).reset_index(drop=True)
                     replace_sheet('contentieux', df_ct_cleaned)
                     st.rerun()
@@ -994,12 +1057,19 @@ def page_creances():
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
             derniere_ecriture=('ecriture_date', 'max'),
-            jours_retard=('jours_retard', 'max')
+            jours_retard=('jours_retard', 'max'),
+            provision_risque=('provision_risque', 'first'),
+            provision_creances_douteuses=('provision_creances_douteuses', 'first'),
         ).reset_index().sort_values('solde', ascending=False)
 
         total_ct = synth_ct['solde'].sum()
-        st.caption(f"**Total contentieux : {total_ct:,.0f} €**".replace(",", " ")
-                   + f" — {len(synth_ct)} dossier(s)")
+        total_pr = synth_ct['provision_risque'].sum()
+        total_pcd = synth_ct['provision_creances_douteuses'].sum()
+        ka, kb, kc, kd = st.columns(4)
+        ka.metric("Total contentieux", f"{total_ct:,.0f} €".replace(",", " "))
+        kb.metric("Dossiers", len(synth_ct))
+        kc.metric("Prov. risque", f"{total_pr:,.0f} €".replace(",", " "))
+        kd.metric("Prov. créances douteuses", f"{total_pcd:,.0f} €".replace(",", " "))
 
         synth_ct_display = synth_ct.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
@@ -1008,10 +1078,14 @@ def page_creances():
             'commercial': 'Commercial', 'agence': 'Agence',
             'solde': 'Solde (€)', 'nb': 'Nb lignes',
             'derniere_ecriture': 'Dernière écriture',
-            'jours_retard': 'Jours retard'
+            'jours_retard': 'Jours retard',
+            'provision_risque': 'Prov. risque (€)',
+            'provision_creances_douteuses': 'Prov. créances douteuses (€)',
         })
         styled_ct = synth_ct_display.style.map(_color_retard, subset=['Jours retard']) \
-            .format({'Solde (€)': '{:.2f}'})
+            .format({'Solde (€)': '{:.2f}',
+                     'Prov. risque (€)': '{:.2f}',
+                     'Prov. créances douteuses (€)': '{:.2f}'})
         st.dataframe(styled_ct, use_container_width=True, hide_index=True)
 
     with st.expander("Détail ligne par ligne"):
@@ -1095,6 +1169,8 @@ def page_notes():
         for _, n in client_notes.iterrows():
             icon = {'Ouvert': '🔴', 'En cours': '🟡', 'Résolu': '🟢'}.get(n['statut'], '⚪')
             with st.expander(f"{icon} {n['date_note']} — {n['auteur']} — {n['action'] or '(note)'}"):
+                if n.get('note_resume'):
+                    st.markdown(f"📌 **Résumé :** {n['note_resume']}")
                 st.write(n['note'])
                 if n['echeance']:
                     st.caption(f"📅 Échéance : {n['echeance']}")
@@ -1116,7 +1192,12 @@ def page_notes():
         auteur = c1.text_input("Auteur", value=st.session_state.get('last_auteur', ''))
         action = c2.text_input("Type d'action",
                                placeholder="ex: Appel, Mail, Relance 1...")
-        note = st.text_area("Note", height=100)
+        note = st.text_area("Note détaillée", height=100)
+        note_resume = st.text_input(
+            "Résumé pour direction (max 100 caractères)",
+            max_chars=100,
+            placeholder="Synthèse 1 ligne pour reporting direction"
+        )
         c3, c4 = st.columns(2)
         echeance = c3.date_input("Échéance (optionnel)", value=None)
         statut = c4.selectbox("Statut", ['Ouvert', 'En cours', 'Résolu'])
@@ -1131,6 +1212,7 @@ def page_notes():
                     'date_note': datetime.now().strftime('%Y-%m-%d %H:%M'),
                     'auteur': auteur,
                     'note': note,
+                    'note_resume': note_resume.strip()[:100],
                     'action': action,
                     'echeance': echeance.isoformat() if echeance else '',
                     'statut': statut,
@@ -1177,8 +1259,8 @@ def page_export():
     df = df_all[~df_all.get('contentieux', False)] if 'contentieux' in df_all.columns \
         else df_all
 
-    tab1, tab2, tab3 = st.tabs(["Export commerciaux", "Export Power BI",
-                                 "Export Contentieux"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Export commerciaux", "Export Power BI",
+                                       "Export Contentieux", "Export Direction"])
 
     with tab1:
         st.markdown("Classeur Excel avec synthèse + une feuille par commercial + relances.")
@@ -1398,6 +1480,92 @@ def page_export():
                     file_name=f"contentieux_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
+    with tab4:
+        st.markdown("Synthèse pour la direction : un seul tableau avec les "
+                    "résumés de note les plus récents.")
+        if st.button("🔧 Générer l'export direction", type="primary"):
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
+
+            # Récupère les notes_resume les plus récents par client
+            notes_all = read_sheet('notes')
+            last_resume = pd.DataFrame(columns=['comp_aux_num', 'note_resume',
+                                                 'date_note', 'auteur'])
+            if not notes_all.empty:
+                if 'note_resume' not in notes_all.columns:
+                    notes_all['note_resume'] = ''
+                # On prend la note la plus récente avec un résumé renseigné
+                notes_with_resume = notes_all[
+                    notes_all['note_resume'].fillna('').astype(str).str.strip() != '']
+                if not notes_with_resume.empty:
+                    last_resume = notes_with_resume.sort_values('date_note',
+                                                                 ascending=False) \
+                        .drop_duplicates('comp_aux_num') \
+                        [['comp_aux_num', 'note_resume', 'date_note', 'auteur']]
+
+            # Synthèse globale (créances ouvertes hors Hors CRM)
+            df_dir = df_all.copy()  # toutes les créances ouvertes (y.c. contentieux)
+
+            ws = wb.create_sheet("Synthèse Direction")
+            headers = ['Code compta', 'Client', 'Ref dossier', 'Commercial',
+                       'Conducteur', 'Agence', 'État',
+                       'Solde dû (€)', 'Jours retard max', 'Statut',
+                       'Prov. risque (€)', 'Prov. créances douteuses (€)',
+                       'Dernier résumé', 'Date résumé', 'Auteur résumé']
+            ws.append(headers)
+            for c in ws[1]:
+                _style_header(c)
+
+            synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib', 'ref_client',
+                                       'commercial', 'conducteur', 'agence',
+                                       'etat'], dropna=False).agg(
+                solde=('solde', 'sum'),
+                jours=('jours_retard', 'max'),
+                contentieux=('contentieux', 'first'),
+                provision_risque=('provision_risque', 'first'),
+                provision_creances_douteuses=('provision_creances_douteuses',
+                                                'first'),
+            ).reset_index().sort_values('solde', ascending=False)
+
+            synth_d = synth_d.merge(last_resume, on='comp_aux_num', how='left')
+
+            for _, r in synth_d.iterrows():
+                statut = "⚖️ Contentieux" if r['contentieux'] else "Suivi commercial"
+                ws.append([
+                    r['comp_aux_num'], r['comp_aux_lib'], r['ref_client'],
+                    r['commercial'], r['conducteur'], r['agence'], r['etat'],
+                    round(r['solde'], 2),
+                    int(r['jours']) if pd.notna(r['jours']) else '',
+                    statut,
+                    round(r['provision_risque'] or 0, 2),
+                    round(r['provision_creances_douteuses'] or 0, 2),
+                    r.get('note_resume', '') or '',
+                    r.get('date_note', '') or '',
+                    r.get('auteur', '') or '',
+                ])
+
+            total_row = ws.max_row + 1
+            ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
+            ws.cell(total_row, 8, f'=SUM(H2:H{total_row - 1})').font = Font(bold=True)
+            ws.cell(total_row, 11, f'=SUM(K2:K{total_row - 1})').font = Font(bold=True)
+            ws.cell(total_row, 12, f'=SUM(L2:L{total_row - 1})').font = Font(bold=True)
+            for col_idx in (8, 11, 12):
+                for row in ws.iter_rows(min_row=2, max_row=total_row,
+                                         min_col=col_idx, max_col=col_idx):
+                    for c in row:
+                        c.number_format = '#,##0.00 €'
+            _autosize(ws)
+            ws.freeze_panes = 'A2'
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            st.download_button(
+                "📥 Télécharger (export_direction.xlsx)",
+                data=buf.getvalue(),
+                file_name=f"direction_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 # ============================================================
