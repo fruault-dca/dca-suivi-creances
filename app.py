@@ -35,10 +35,11 @@ HEADERS = {
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
     'mapping': ['piece_ref', 'ref_client', 'comp_aux_num', 'date_facture'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
-              'note_resume', 'action', 'echeance', 'statut'],
+              'action', 'echeance', 'statut'],
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
                     'date_passage', 'commentaire',
                     'provision_risque', 'provision_creances_douteuses'],
+    'resumes': ['comp_aux_num', 'ref_client', 'resume', 'date_maj', 'auteur'],
 }
 
 
@@ -1169,8 +1170,6 @@ def page_notes():
         for _, n in client_notes.iterrows():
             icon = {'Ouvert': '🔴', 'En cours': '🟡', 'Résolu': '🟢'}.get(n['statut'], '⚪')
             with st.expander(f"{icon} {n['date_note']} — {n['auteur']} — {n['action'] or '(note)'}"):
-                if n.get('note_resume'):
-                    st.markdown(f"📌 **Résumé :** {n['note_resume']}")
                 st.write(n['note'])
                 if n['echeance']:
                     st.caption(f"📅 Échéance : {n['echeance']}")
@@ -1186,6 +1185,48 @@ def page_notes():
                     delete_row_by_id('notes', int(n['id']))
                     st.rerun()
 
+    # --- Résumé direction (un par client, écrasable) ---
+    st.subheader("📌 Résumé direction (1 ligne par client)")
+    df_res = read_sheet('resumes')
+    cur_resume = ''
+    cur_resume_meta = ''
+    if not df_res.empty and 'comp_aux_num' in df_res.columns:
+        match = df_res[df_res['comp_aux_num'] == comp_aux_num]
+        if not match.empty:
+            cur_resume = str(match.iloc[0].get('resume', '') or '')
+            cur_resume_meta = (f"Mis à jour le {match.iloc[0].get('date_maj', '')} "
+                               f"par {match.iloc[0].get('auteur', '')}")
+
+    with st.form("resume_form", clear_on_submit=False):
+        new_resume = st.text_input(
+            "Résumé (max 100 caractères) — sera repris dans l'export Direction",
+            value=cur_resume, max_chars=100,
+            placeholder="Ex: Litige sur facture 26/0000123, attente expertise contradictoire"
+        )
+        resume_auteur = st.text_input(
+            "Auteur", value=st.session_state.get('last_auteur', ''),
+            key="resume_auteur")
+        if cur_resume_meta:
+            st.caption(cur_resume_meta)
+        cs1, cs2 = st.columns([1, 5])
+        if cs1.form_submit_button("💾 Enregistrer le résumé", type="primary"):
+            st.session_state['last_auteur'] = resume_auteur
+            new_row = pd.DataFrame([{
+                'comp_aux_num': comp_aux_num,
+                'ref_client': info.get('ref_client', ''),
+                'resume': new_resume.strip()[:100],
+                'date_maj': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'auteur': resume_auteur,
+            }])
+            if df_res.empty:
+                merged = new_row
+            else:
+                merged = df_res[df_res['comp_aux_num'] != comp_aux_num]
+                merged = pd.concat([merged, new_row], ignore_index=True)
+            replace_sheet('resumes', merged)
+            st.success("✅ Résumé enregistré.")
+            st.rerun()
+
     st.subheader("➕ Ajouter une note")
     with st.form("new_note", clear_on_submit=True):
         c1, c2 = st.columns(2)
@@ -1193,11 +1234,6 @@ def page_notes():
         action = c2.text_input("Type d'action",
                                placeholder="ex: Appel, Mail, Relance 1...")
         note = st.text_area("Note détaillée", height=100)
-        note_resume = st.text_input(
-            "Résumé pour direction (max 100 caractères)",
-            max_chars=100,
-            placeholder="Synthèse 1 ligne pour reporting direction"
-        )
         c3, c4 = st.columns(2)
         echeance = c3.date_input("Échéance (optionnel)", value=None)
         statut = c4.selectbox("Statut", ['Ouvert', 'En cours', 'Résolu'])
@@ -1212,7 +1248,6 @@ def page_notes():
                     'date_note': datetime.now().strftime('%Y-%m-%d %H:%M'),
                     'auteur': auteur,
                     'note': note,
-                    'note_resume': note_resume.strip()[:100],
                     'action': action,
                     'echeance': echeance.isoformat() if echeance else '',
                     'statut': statut,
@@ -1488,21 +1523,16 @@ def page_export():
             wb = openpyxl.Workbook()
             wb.remove(wb.active)
 
-            # Récupère les notes_resume les plus récents par client
-            notes_all = read_sheet('notes')
+            # Récupère le résumé direction (1 par client) depuis la feuille dédiée
+            df_resumes = read_sheet('resumes')
             last_resume = pd.DataFrame(columns=['comp_aux_num', 'note_resume',
                                                  'date_note', 'auteur'])
-            if not notes_all.empty:
-                if 'note_resume' not in notes_all.columns:
-                    notes_all['note_resume'] = ''
-                # On prend la note la plus récente avec un résumé renseigné
-                notes_with_resume = notes_all[
-                    notes_all['note_resume'].fillna('').astype(str).str.strip() != '']
-                if not notes_with_resume.empty:
-                    last_resume = notes_with_resume.sort_values('date_note',
-                                                                 ascending=False) \
-                        .drop_duplicates('comp_aux_num') \
-                        [['comp_aux_num', 'note_resume', 'date_note', 'auteur']]
+            if not df_resumes.empty and 'comp_aux_num' in df_resumes.columns:
+                last_resume = df_resumes.rename(columns={
+                    'resume': 'note_resume',
+                    'date_maj': 'date_note',
+                })[['comp_aux_num', 'note_resume', 'date_note', 'auteur']] \
+                    .drop_duplicates('comp_aux_num')
 
             # Synthèse globale (créances ouvertes hors Hors CRM)
             df_dir = df_all.copy()  # toutes les créances ouvertes (y.c. contentieux)
