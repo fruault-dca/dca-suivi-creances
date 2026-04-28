@@ -59,7 +59,17 @@ def get_spreadsheet():
 
 @st.cache_resource
 def get_ws(name):
-    return get_spreadsheet().worksheet(name)
+    ss = get_spreadsheet()
+    try:
+        return ss.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        # Crée la feuille manquante à la volée
+        headers = HEADERS.get(name, [])
+        ws = _with_retry(ss.add_worksheet, title=name, rows=100,
+                         cols=max(len(headers), 1))
+        if headers:
+            _with_retry(ws.update, values=[headers], range_name='A1')
+        return ws
 
 
 def _with_retry(fn, *args, **kwargs):
