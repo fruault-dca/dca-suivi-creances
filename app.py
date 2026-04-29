@@ -16,6 +16,43 @@ import time, random
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
 
+# Charte graphique DCA (Design Constructions et Associés)
+st.markdown("""
+<style>
+/* Police Segoe UI sur toute l'app */
+html, body, [class*="css"], .stMarkdown, .stButton, .stTextInput, .stDataFrame {
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Titres en bleu marine DCA */
+h1, h2, h3, h4 { color: #2C3E50; font-weight: 600; }
+
+/* Métriques : valeur en bleu marine, label en gris */
+[data-testid="stMetricValue"] { color: #2C3E50; font-weight: 700; }
+[data-testid="stMetricLabel"] { color: #546E7A; }
+
+/* Boutons primaires en vert DCA */
+.stButton > button[kind="primary"] {
+    background-color: #60A020;
+    border-color: #4A7A18;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #4A7A18;
+    border-color: #355A10;
+}
+
+/* Sidebar plus contrastée */
+[data-testid="stSidebar"] { background-color: #F0F0F0; }
+
+/* Headers de tableau en bleu marine */
+.stDataFrame thead tr th {
+    background-color: #2C3E50 !important;
+    color: white !important;
+    font-weight: 600;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ============================================================
 # CONFIGURATION GOOGLE SHEETS
 # ============================================================
@@ -1032,7 +1069,8 @@ def page_creances():
         jours_retard=('jours_retard', 'max')
     ).reset_index().sort_values('solde', ascending=False)
 
-    # Coloration conditionnelle jours de retard : vert <7, orange 7-29, rouge >=30
+    # Coloration conditionnelle jours de retard (charte DCA) :
+    # vert <7, orange 7-29, rouge >=30
     def _color_retard(v):
         try:
             v = int(v)
@@ -1041,10 +1079,10 @@ def page_creances():
         if v <= 0:
             return ''
         if v < 7:
-            return 'background-color: #C8E6C9; color: #1B5E20;'  # vert
+            return 'background-color: #C0DD97; color: #355A10;'  # vert DCA
         if v < 30:
-            return 'background-color: #FFE0B2; color: #E65100;'  # orange
-        return 'background-color: #FFCDD2; color: #B71C1C;'  # rouge
+            return 'background-color: #F5D7A8; color: #8B5A00;'  # orange DCA
+        return 'background-color: #F5BEB6; color: #7A1F12;'  # rouge DCA
 
     synth_display = synth.rename(columns={
         'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
@@ -1266,10 +1304,23 @@ def page_notes():
                 st.rerun()
 
 
+# Charte graphique Design Constructions
+DCA_PRIMARY = '60A020'      # vert DCA
+DCA_SECONDARY = '2C3E50'    # bleu marine
+DCA_NEUTRAL = 'D4880C'      # orange
+DCA_BAD = 'C0392B'          # rouge
+
+
 def _style_header(cell):
-    cell.font = Font(name='Arial', bold=True, color='FFFFFF', size=11)
-    cell.fill = PatternFill('solid', start_color='1F3864')
+    cell.font = Font(name='Segoe UI', bold=True, color='FFFFFF', size=11)
+    cell.fill = PatternFill('solid', start_color=DCA_SECONDARY)
     cell.alignment = Alignment(horizontal='center', vertical='center')
+
+
+def _style_total(cell):
+    cell.font = Font(name='Segoe UI', bold=True, color='FFFFFF', size=11)
+    cell.fill = PatternFill('solid', start_color=DCA_PRIMARY)
+    cell.alignment = Alignment(horizontal='right', vertical='center')
 
 
 def _autosize(ws):

@@ -1,0 +1,15 @@
+# ============================================================
+# CHARTE GRAPHIQUE — Design Constructions et Associés
+# ============================================================
+[theme]
+# Couleur principale (vert DCA) — boutons, sliders, focus
+primaryColor = "#60A020"
+# Fond général de l'app
+backgroundColor = "#FFFFFF"
+# Fond secondaire (sidebar, blocs info, expanders)
+secondaryBackgroundColor = "#F0F0F0"
+# Couleur du texte principal (bleu marine DCA)
+textColor = "#2C3E50"
+# Police
+font = "sans serif"
+base = "light"
