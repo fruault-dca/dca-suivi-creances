@@ -403,30 +403,38 @@ def load_creances_enrichies(only_open=True):
     df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
     # Flag contentieux + responsable + provisions
+    # Match sur ref_client (cas dossier CRM) OU comp_aux_num (cas client FEC sans CRM)
     df_ct = read_sheet('contentieux')
+    df_c['contentieux'] = False
+    df_c['responsable'] = ''
+    df_c['provision_risque'] = 0.0
+    df_c['provision_creances_douteuses'] = 0.0
+
     if not df_ct.empty and 'ref_client' in df_ct.columns:
-        ct_cols = ['ref_client', 'responsable']
-        for col in ['provision_risque', 'provision_creances_douteuses']:
-            if col in df_ct.columns:
-                ct_cols.append(col)
-        df_ct_small = df_ct[ct_cols].drop_duplicates('ref_client')
-        # Cast provisions en numérique
-        for col in ['provision_risque', 'provision_creances_douteuses']:
-            if col in df_ct_small.columns:
-                df_ct_small[col] = pd.to_numeric(df_ct_small[col], errors='coerce').fillna(0)
-        df_c = df_c.merge(df_ct_small, on='ref_client', how='left')
-        df_c['contentieux'] = df_c['responsable'].notna() & (df_c['responsable'] != '')
-        df_c['responsable'] = df_c['responsable'].fillna('')
-        for col in ['provision_risque', 'provision_creances_douteuses']:
-            if col in df_c.columns:
-                df_c[col] = pd.to_numeric(df_c[col], errors='coerce').fillna(0)
-            else:
-                df_c[col] = 0
-    else:
-        df_c['contentieux'] = False
-        df_c['responsable'] = ''
-        df_c['provision_risque'] = 0
-        df_c['provision_creances_douteuses'] = 0
+        prov_cols = [c for c in ['provision_risque', 'provision_creances_douteuses']
+                     if c in df_ct.columns]
+
+        for _, ct in df_ct.iterrows():
+            ref = str(ct.get('ref_client', '') or '').strip()
+            comp = str(ct.get('comp_aux_num', '') or '').strip()
+            resp = str(ct.get('responsable', '') or '').strip()
+            if not resp:
+                continue
+
+            mask = pd.Series(False, index=df_c.index)
+            if ref:
+                mask |= (df_c['ref_client'].astype(str) == ref)
+            if comp:
+                mask |= (df_c['comp_aux_num'].astype(str) == comp)
+
+            if mask.any():
+                df_c.loc[mask, 'contentieux'] = True
+                df_c.loc[mask, 'responsable'] = resp
+                for pc in prov_cols:
+                    val = pd.to_numeric(ct.get(pc, 0), errors='coerce')
+                    if pd.isna(val):
+                        val = 0.0
+                    df_c.loc[mask, pc] = val
 
     return df_c.sort_values('solde', ascending=False)
 
