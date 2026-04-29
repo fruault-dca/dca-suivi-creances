@@ -267,7 +267,9 @@ def parse_fec(file_content):
     else:
         raise ValueError("Impossible de décoder le FEC")
 
-    mask = df['CompteNum'].str.startswith('411', na=False)
+    # 411xxx : créances clients normales / 416xxx : clients douteux ou litigieux
+    mask = df['CompteNum'].str.startswith('411', na=False) \
+         | df['CompteNum'].str.startswith('416', na=False)
     clients = df[mask].copy()
     clients['Debit'] = clients['Debit'].apply(to_float)
     clients['Credit'] = clients['Credit'].apply(to_float)
@@ -450,7 +452,8 @@ def page_import():
 
     with tab1:
         st.markdown("**Import du Fichier d'Écritures Comptables**")
-        st.caption("Extrait les comptes 411xxx. Les écritures lettrées sont marquées comme soldées.")
+        st.caption("Extrait les comptes 411xxx (créances clients) et 416xxx (clients douteux/litigieux). "
+                   "Les écritures lettrées sont marquées comme soldées.")
         fec_file = st.file_uploader("Fichier FEC (.txt)", type=['txt'], key='fec')
         if fec_file and st.button("Importer le FEC", type="primary"):
             try:
