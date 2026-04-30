@@ -1614,7 +1614,7 @@ def page_export():
             df_dir = df_all.copy()  # toutes les créances ouvertes (y.c. contentieux)
 
             ws = wb.create_sheet("Synthèse Direction")
-            headers = ['Code compta', 'Client', 'Ref dossier', 'Commercial',
+            headers = ['Client', 'Commercial',
                        'Conducteur', 'Agence', 'État',
                        'Solde dû (€)', 'Jours retard max', 'Statut',
                        'Prov. risque (€)', 'Prov. créances douteuses (€)',
@@ -1623,7 +1623,7 @@ def page_export():
             for c in ws[1]:
                 _style_header(c)
 
-            synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib', 'ref_client',
+            synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib',
                                        'commercial', 'conducteur', 'agence',
                                        'etat'], dropna=False).agg(
                 solde=('solde', 'sum'),
@@ -1639,7 +1639,7 @@ def page_export():
             for _, r in synth_d.iterrows():
                 statut = "⚖️ Contentieux" if r['contentieux'] else "Suivi commercial"
                 ws.append([
-                    r['comp_aux_num'], r['comp_aux_lib'], r['ref_client'],
+                    r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['agence'], r['etat'],
                     round(r['solde'], 2),
                     int(r['jours']) if pd.notna(r['jours']) else '',
@@ -1653,10 +1653,11 @@ def page_export():
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            ws.cell(total_row, 8, f'=SUM(H2:H{total_row - 1})').font = Font(bold=True)
-            ws.cell(total_row, 11, f'=SUM(K2:K{total_row - 1})').font = Font(bold=True)
-            ws.cell(total_row, 12, f'=SUM(L2:L{total_row - 1})').font = Font(bold=True)
-            for col_idx in (8, 11, 12):
+            # Solde dû = colonne F (6), Prov risque = I (9), Prov creances douteuses = J (10)
+            ws.cell(total_row, 6, f'=SUM(F2:F{total_row - 1})').font = Font(bold=True)
+            ws.cell(total_row, 9, f'=SUM(I2:I{total_row - 1})').font = Font(bold=True)
+            ws.cell(total_row, 10, f'=SUM(J2:J{total_row - 1})').font = Font(bold=True)
+            for col_idx in (6, 9, 10):
                 for row in ws.iter_rows(min_row=2, max_row=total_row,
                                          min_col=col_idx, max_col=col_idx):
                     for c in row:
