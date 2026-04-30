@@ -750,7 +750,9 @@ def page_import():
                 if not df_m.empty else set()
             df_c['_pk'] = df_c['piece_ref'].apply(_norm_piece)
             non_map = df_c[~df_c['_pk'].isin(mapped_keys)]
-            non_map = non_map.groupby(['piece_ref', 'comp_aux_num', 'comp_aux_lib']).agg(
+            # Dédup sur (piece_ref, comp_aux_num) pour éviter les doublons 411 vs 416
+            non_map = non_map.groupby(['piece_ref', 'comp_aux_num'], dropna=False).agg(
+                comp_aux_lib=('comp_aux_lib', 'first'),
                 solde=('solde', 'sum'),
                 date=('ecriture_date', 'first')
             ).reset_index().sort_values('solde', ascending=False)
@@ -834,14 +836,16 @@ def page_import():
                         options_vals.append(r['ref_client'])
 
                 st.divider()
-                for _, row in page_df.iterrows():
+                for i_row, row in page_df.reset_index(drop=True).iterrows():
                     c1, c2, c3 = st.columns([2, 3, 1])
                     c1.write(f"**{row['piece_ref']}**")
                     c1.caption(f"{row['comp_aux_num']} — {row['comp_aux_lib']}")
+                    # Clé unique : piece_ref + comp_aux_num + index (évite les doublons 411/416)
+                    sel_key = f"map_{row['piece_ref']}_{row['comp_aux_num']}_{i_row}"
                     idx = c2.selectbox(
                         "Dossier", range(len(options_labels)),
                         format_func=lambda i: options_labels[i],
-                        key=f"map_{row['piece_ref']}",
+                        key=sel_key,
                         label_visibility="collapsed")
                     c3.write(f"{row['solde']:,.0f} €".replace(",", " "))
                     if idx > 0:  # 0 = placeholder "— Choisir —"
