@@ -867,10 +867,11 @@ def page_import():
                 with st.expander("⊘ Factures marquées Hors CRM (cliquer pour réaffecter)"):
                     hors = df_m[df_m['ref_client'] == '__HORS_CRM__']
                     st.write(f"{len(hors)} facture(s) marquée(s) Hors CRM")
-                    for _, hr in hors.iterrows():
+                    for i_h, hr in hors.iterrows():
                         cc1, cc2 = st.columns([3, 1])
                         cc1.write(f"**{hr['piece_ref']}** ({hr['comp_aux_num']})")
-                        if cc2.button("↶ Annuler", key=f"unhors_{hr['piece_ref']}"):
+                        if cc2.button("↶ Annuler",
+                                       key=f"unhors_{i_h}_{hr['piece_ref']}_{hr['comp_aux_num']}"):
                             df_m_cleaned = df_m[df_m['piece_ref'] != hr['piece_ref']]
                             replace_sheet('mapping', df_m_cleaned)
                             st.rerun()
