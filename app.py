@@ -406,6 +406,8 @@ def load_creances_enrichies(only_open=True):
     df_c['_dt'] = df_c['_dt_progemi'].fillna(df_c['_dt_piece']).fillna(df_c['_dt_ecr'])
     df_c['jours_retard'] = (today - df_c['_dt']).dt.days
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
+    # Date de facture effective (priorité PROGEMI > FEC piece_date > ecriture_date)
+    df_c['date_facture_eff'] = df_c['_dt'].dt.strftime('%Y-%m-%d').fillna('')
     df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
     # Flag chantier livré : si date_reception est renseignée
@@ -1194,23 +1196,26 @@ def page_creances():
              'commercial', 'conducteur', 'etat'], dropna=False).agg(
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
-            derniere_ecriture=('ecriture_date', 'max'),
+            derniere_facture=('date_facture_eff', 'max'),
             jours_retard=('jours_retard', 'max')
         ).reset_index().sort_values('solde', ascending=False)
+
+        ka, kb = st.columns(2)
+        ka.metric("Total dû en cours",
+                  f"{f_en_cours['solde'].sum():,.0f} €".replace(",", " "))
+        kb.metric("Nb dossiers", len(synth_ec))
 
         synth_ec_display = synth_ec.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
             'commercial': 'Commercial', 'conducteur': 'Conducteur',
             'etat': 'État', 'solde': 'Solde (€)',
-            'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
+            'nb': 'Nb lignes', 'derniere_facture': 'Dernière facture',
             'jours_retard': 'Jours retard'
         })
         styled_ec = synth_ec_display.style.map(_color_retard, subset=['Jours retard']) \
             .format({'Solde (€)': '{:.2f}'})
         st.dataframe(styled_ec, use_container_width=True, hide_index=True)
-        st.caption(f"Total en cours : {f_en_cours['solde'].sum():,.0f} €"
-                   .replace(",", " "))
 
     # --- Synthèse Chantiers LIVRÉS ---
     st.subheader("🏠 Chantiers livrés")
@@ -1222,11 +1227,20 @@ def page_creances():
              'commercial', 'conducteur', 'etat'], dropna=False).agg(
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
-            derniere_ecriture=('ecriture_date', 'max'),
+            derniere_facture=('date_facture_eff', 'max'),
             jours_retard=('jours_retard', 'max'),
             montant_consigne=('montant_consigne', 'first'),
         ).reset_index().sort_values('solde', ascending=False)
         synth_lv['solde_net'] = synth_lv['solde'] - synth_lv['montant_consigne'].fillna(0)
+
+        total_lv = synth_lv['solde'].sum()
+        total_cons = synth_lv['montant_consigne'].sum()
+        total_net = synth_lv['solde_net'].sum()
+        ka, kb, kc, kd = st.columns(4)
+        ka.metric("Total dû livrés", f"{total_lv:,.0f} €".replace(",", " "))
+        kb.metric("Nb dossiers", len(synth_lv))
+        kc.metric("Total consigné", f"{total_cons:,.0f} €".replace(",", " "))
+        kd.metric("Solde net", f"{total_net:,.0f} €".replace(",", " "))
 
         synth_lv_display = synth_lv.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
@@ -1235,7 +1249,7 @@ def page_creances():
             'etat': 'État', 'solde': 'Solde (€)',
             'montant_consigne': 'Consigné huissier (€)',
             'solde_net': 'Solde net (€)',
-            'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
+            'nb': 'Nb lignes', 'derniere_facture': 'Dernière facture',
             'jours_retard': 'Jours retard'
         })
         styled_lv = synth_lv_display.style.map(_color_retard, subset=['Jours retard']) \
@@ -1243,10 +1257,6 @@ def page_creances():
                      'Consigné huissier (€)': '{:.2f}',
                      'Solde net (€)': '{:.2f}'})
         st.dataframe(styled_lv, use_container_width=True, hide_index=True)
-        st.caption(f"Total livrés : {f_livres['solde'].sum():,.0f} € · "
-                   f"Consigné : {synth_lv['montant_consigne'].sum():,.0f} € · "
-                   f"Net : {synth_lv['solde_net'].sum():,.0f} €"
-                   .replace(",", " "))
 
     # --- Sous-tableau Contentieux ---
     if not f_contentieux.empty:
@@ -1256,33 +1266,39 @@ def page_creances():
              'responsable', 'commercial'], dropna=False).agg(
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
-            derniere_ecriture=('ecriture_date', 'max'),
+            derniere_facture=('date_facture_eff', 'max'),
             jours_retard=('jours_retard', 'max'),
             provision_risque=('provision_risque', 'first'),
             provision_creances_douteuses=('provision_creances_douteuses', 'first'),
+            montant_consigne=('montant_consigne', 'first'),
         ).reset_index().sort_values('solde', ascending=False)
 
         total_ct = synth_ct['solde'].sum()
+        total_cons_ct = synth_ct['montant_consigne'].sum()
         total_pr = synth_ct['provision_risque'].sum()
         total_pcd = synth_ct['provision_creances_douteuses'].sum()
-        ka, kb, kc, kd = st.columns(4)
+        ka, kb, kc, kd, ke = st.columns(5)
         ka.metric("Total contentieux", f"{total_ct:,.0f} €".replace(",", " "))
         kb.metric("Dossiers", len(synth_ct))
-        kc.metric("Prov. risque", f"{total_pr:,.0f} €".replace(",", " "))
-        kd.metric("Prov. créances douteuses", f"{total_pcd:,.0f} €".replace(",", " "))
+        kc.metric("Total consigné", f"{total_cons_ct:,.0f} €".replace(",", " "))
+        kd.metric("Prov. risque", f"{total_pr:,.0f} €".replace(",", " "))
+        ke.metric("Prov. créances douteuses",
+                  f"{total_pcd:,.0f} €".replace(",", " "))
 
         synth_ct_display = synth_ct.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
             'responsable': 'Responsable', 'commercial': 'Commercial',
             'solde': 'Solde (€)', 'nb': 'Nb lignes',
-            'derniere_ecriture': 'Dernière écriture',
+            'derniere_facture': 'Dernière facture',
             'jours_retard': 'Jours retard',
+            'montant_consigne': 'Consigné huissier (€)',
             'provision_risque': 'Prov. risque (€)',
             'provision_creances_douteuses': 'Prov. créances douteuses (€)',
         })
         styled_ct = synth_ct_display.style.map(_color_retard, subset=['Jours retard']) \
             .format({'Solde (€)': '{:.2f}',
+                     'Consigné huissier (€)': '{:.2f}',
                      'Prov. risque (€)': '{:.2f}',
                      'Prov. créances douteuses (€)': '{:.2f}'})
         st.dataframe(styled_ct, use_container_width=True, hide_index=True)
