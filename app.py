@@ -250,9 +250,22 @@ def to_str(val):
 
 
 def format_date_fec(d):
-    s = to_str(d)
+    s = to_str(d).strip()
+    if not s:
+        return ''
+    # Format FEC standard YYYYMMDD
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    # Format ISO déjà bon
+    if len(s) >= 10 and s[4] == '-' and s[7] == '-':
+        return s[:10]
+    # Format DD/MM/YYYY ou DD-MM-YYYY → on bascule en YYYY-MM-DD
+    try:
+        dt = pd.to_datetime(s, errors='coerce', dayfirst=True)
+        if pd.notna(dt):
+            return dt.date().isoformat()
+    except Exception:
+        pass
     return s
 
 
@@ -314,7 +327,8 @@ def load_creances_enrichies(only_open=True):
         if not df_c.empty:
             kept_rows = []
             # Tri sur date pour FIFO (plus anciennes d'abord)
-            df_c['_date_sort'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
+            df_c['_date_sort'] = pd.to_datetime(df_c['ecriture_date'],
+                                                 errors='coerce', dayfirst=True)
 
             for comp_num, grp in df_c.groupby('comp_aux_num', dropna=False):
                 debits = grp[grp['debit'] > 0].sort_values('_date_sort').copy()
@@ -395,14 +409,17 @@ def load_creances_enrichies(only_open=True):
     # puis piece_date du FEC, puis fallback ecriture_date
     today = pd.Timestamp(datetime.now().date())
     if 'date_facture' in df_c.columns:
-        df_c['_dt_progemi'] = pd.to_datetime(df_c['date_facture'], errors='coerce')
+        df_c['_dt_progemi'] = pd.to_datetime(df_c['date_facture'],
+                                              errors='coerce', dayfirst=True)
     else:
         df_c['_dt_progemi'] = pd.NaT
     if 'piece_date' in df_c.columns:
-        df_c['_dt_piece'] = pd.to_datetime(df_c['piece_date'], errors='coerce')
+        df_c['_dt_piece'] = pd.to_datetime(df_c['piece_date'],
+                                            errors='coerce', dayfirst=True)
     else:
         df_c['_dt_piece'] = pd.NaT
-    df_c['_dt_ecr'] = pd.to_datetime(df_c['ecriture_date'], errors='coerce')
+    df_c['_dt_ecr'] = pd.to_datetime(df_c['ecriture_date'],
+                                      errors='coerce', dayfirst=True)
     df_c['_dt'] = df_c['_dt_progemi'].fillna(df_c['_dt_piece']).fillna(df_c['_dt_ecr'])
     df_c['jours_retard'] = (today - df_c['_dt']).dt.days
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
@@ -663,11 +680,23 @@ def page_import():
                             + (f", date=`{col_date}`" if col_date else ""))
 
                     def _fmt_date(v):
-                        """Parse une date (str ou datetime) vers YYYY-MM-DD."""
-                        if v is None or str(v).strip() == '' or str(v).lower() == 'nan':
+                        """Parse une date Excel (serial, datetime, str DD/MM/YYYY...) vers YYYY-MM-DD."""
+                        if v is None:
                             return ''
+                        s = str(v).strip()
+                        if s == '' or s.lower() == 'nan':
+                            return ''
+                        # Cas 1 : numéro de série Excel (ex "45870" = 01/08/2025)
                         try:
-                            d = pd.to_datetime(v, errors='coerce', dayfirst=True)
+                            n = float(s.replace(',', '.'))
+                            if 20000 < n < 80000:  # plage raisonnable (1954-2119)
+                                d = pd.Timestamp('1899-12-30') + pd.Timedelta(days=n)
+                                return d.date().isoformat()
+                        except (ValueError, TypeError):
+                            pass
+                        # Cas 2 : chaîne lisible — on tente avec dayfirst=True
+                        try:
+                            d = pd.to_datetime(s, errors='coerce', dayfirst=True)
                             if pd.isna(d):
                                 return ''
                             return d.date().isoformat()
