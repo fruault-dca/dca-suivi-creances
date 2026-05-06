@@ -76,7 +76,11 @@ HEADERS = {
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
                     'date_passage', 'commentaire',
                     'provision_risque', 'provision_creances_douteuses'],
-    'resumes': ['comp_aux_num', 'ref_client', 'resume', 'date_maj', 'auteur'],
+    'resumes': ['comp_aux_num', 'ref_client', 'resume',
+                'action_resume', 'responsable_action',
+                'date_maj', 'auteur'],
+    'consignations': ['comp_aux_num', 'ref_client', 'montant_consigne',
+                      'date_consignation', 'commentaire'],
 }
 
 
@@ -404,6 +408,24 @@ def load_creances_enrichies(only_open=True):
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
     df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
+    # Flag chantier livré : si date_reception est renseignée
+    if 'date_reception' in df_c.columns:
+        df_c['est_livre'] = df_c['date_reception'].fillna('').astype(str).str.strip() != ''
+    else:
+        df_c['est_livre'] = False
+
+    # Merge consignations huissier (montant consigné par client)
+    df_cons = read_sheet('consignations')
+    if not df_cons.empty and 'comp_aux_num' in df_cons.columns:
+        df_cons_small = df_cons[['comp_aux_num', 'montant_consigne']].copy()
+        df_cons_small['montant_consigne'] = pd.to_numeric(
+            df_cons_small['montant_consigne'], errors='coerce').fillna(0)
+        df_cons_small = df_cons_small.drop_duplicates('comp_aux_num')
+        df_c = df_c.merge(df_cons_small, on='comp_aux_num', how='left')
+        df_c['montant_consigne'] = df_c['montant_consigne'].fillna(0)
+    else:
+        df_c['montant_consigne'] = 0.0
+
     # Flag contentieux + responsable + provisions
     # Match sur ref_client (cas dossier CRM) OU comp_aux_num (cas client FEC sans CRM)
     df_ct = read_sheet('contentieux')
@@ -447,8 +469,9 @@ def load_creances_enrichies(only_open=True):
 def page_import():
     st.header("📥 Import des données")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["FEC", "CRM (Chantiers)",
-                                       "Mapping factures", "Contentieux"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "FEC", "CRM (Chantiers)", "Mapping factures",
+        "Contentieux", "Consignations huissier"])
 
     with tab1:
         st.markdown("**Import du Fichier d'Écritures Comptables**")
@@ -1011,6 +1034,75 @@ def page_import():
                     replace_sheet('contentieux', df_ct_cleaned)
                     st.rerun()
 
+    with tab5:
+        st.markdown("**Consignations chez l'huissier (chantiers livrés)**")
+        st.caption("Saisie manuelle des montants consignés. Soustraits du solde "
+                   "dans la synthèse 'Chantiers livrés'.")
+
+        df_cons_e = read_sheet('consignations')
+        df_c_cons = read_sheet('creances')
+
+        st.markdown("### Ajouter / mettre à jour une consignation")
+
+        # Liste des clients FEC pour saisie
+        if df_c_cons.empty:
+            st.info("Importez d'abord le FEC.")
+        else:
+            clients_list = df_c_cons[['comp_aux_num', 'comp_aux_lib']] \
+                .drop_duplicates('comp_aux_num') \
+                .sort_values('comp_aux_lib')
+            options_lab = ["— Choisir un client —"] + [
+                f"{r['comp_aux_num']} — {r['comp_aux_lib']}"
+                for _, r in clients_list.iterrows()
+            ]
+            options_val = [None] + clients_list['comp_aux_num'].tolist()
+
+            cc1, cc2, cc3 = st.columns([3, 2, 3])
+            sel_idx = cc1.selectbox("Client", range(len(options_lab)),
+                                     format_func=lambda i: options_lab[i],
+                                     key="cons_sel")
+            mt = cc2.number_input("Montant consigné (€)", min_value=0.0,
+                                   step=100.0, format="%.2f", key="cons_mt")
+            comm = cc3.text_input("Commentaire", key="cons_comm",
+                                   placeholder="Facultatif")
+
+            if st.button("💾 Enregistrer la consignation", type="primary"):
+                if sel_idx == 0:
+                    st.warning("Sélectionnez un client.")
+                else:
+                    comp = options_val[sel_idx]
+                    new_row = pd.DataFrame([{
+                        'comp_aux_num': comp,
+                        'ref_client': '',
+                        'montant_consigne': float(mt),
+                        'date_consignation': datetime.now().date().isoformat(),
+                        'commentaire': comm.strip(),
+                    }])
+                    if df_cons_e.empty:
+                        merged = new_row
+                    else:
+                        merged = df_cons_e[df_cons_e['comp_aux_num'] != comp]
+                        merged = pd.concat([merged, new_row], ignore_index=True)
+                    replace_sheet('consignations', merged)
+                    st.success("✅ Consignation enregistrée.")
+                    st.rerun()
+
+        st.markdown("### Consignations enregistrées")
+        if df_cons_e.empty:
+            st.info("Aucune consignation.")
+        else:
+            for i_c, r in df_cons_e.iterrows():
+                cc1, cc2, cc3 = st.columns([3, 2, 1])
+                cc1.write(f"**{r['comp_aux_num']}** — {r.get('commentaire', '') or '—'}")
+                cc1.caption(f"Le {r.get('date_consignation', '')}")
+                cc2.write(f"💰 {float(r.get('montant_consigne', 0) or 0):,.2f} €"
+                          .replace(",", " "))
+                if cc3.button("🗑️", key=f"del_cons_{i_c}_{r['comp_aux_num']}",
+                              help="Supprimer"):
+                    df_cons_cleaned = df_cons_e.drop(index=i_c).reset_index(drop=True)
+                    replace_sheet('consignations', df_cons_cleaned)
+                    st.rerun()
+
     st.divider()
     df_c = read_sheet('creances')
     df_d = read_sheet('dossiers')
@@ -1039,24 +1131,20 @@ def page_creances():
     if 'conducteur' not in df.columns:
         df['conducteur'] = ''
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     coms = ['(Tous)'] + sorted([c for c in df['commercial'].dropna().unique() if c])
     filt_com = c1.selectbox("Commercial", coms)
     conds = ['(Tous)'] + sorted([c for c in df['conducteur'].dropna().unique() if c])
     filt_cond = c2.selectbox("Conducteur", conds)
-    ags = ['(Toutes)'] + sorted([a for a in df['agence'].dropna().unique() if a])
-    filt_ag = c3.selectbox("Agence", ags)
     etats = ['(Tous)'] + sorted([e for e in df['etat'].dropna().unique() if e])
-    filt_et = c4.selectbox("État dossier", etats)
-    seuil = c5.number_input("Solde mini (€)", value=0, step=500)
+    filt_et = c3.selectbox("État dossier", etats)
+    seuil = c4.number_input("Solde mini (€)", value=0, step=500)
 
     f = df.copy()
     if filt_com != '(Tous)':
         f = f[f['commercial'] == filt_com]
     if filt_cond != '(Tous)':
         f = f[f['conducteur'] == filt_cond]
-    if filt_ag != '(Toutes)':
-        f = f[f['agence'] == filt_ag]
     if filt_et != '(Tous)':
         f = f[f['etat'] == filt_et]
     f = f[f['solde'] >= seuil]
@@ -1076,15 +1164,6 @@ def page_creances():
     k3.metric("Lignes rattachées", f"{nb_mappes} / {len(f)}")
     k4.metric("Non rattaché (€)", f"{non_mappe:,.0f}".replace(",", " "))
 
-    st.subheader("Synthèse par client")
-    synth = f.groupby(['comp_aux_num', 'comp_aux_lib', 'ref_client', 'client',
-                       'commercial', 'conducteur', 'agence', 'etat'], dropna=False).agg(
-        solde=('solde', 'sum'),
-        nb=('piece_ref', 'count'),
-        derniere_ecriture=('ecriture_date', 'max'),
-        jours_retard=('jours_retard', 'max')
-    ).reset_index().sort_values('solde', ascending=False)
-
     # Coloration conditionnelle jours de retard (charte DCA) :
     # vert <7, orange 7-29, rouge >=30
     def _color_retard(v):
@@ -1100,25 +1179,81 @@ def page_creances():
             return 'background-color: #F5D7A8; color: #8B5A00;'  # orange DCA
         return 'background-color: #F5BEB6; color: #7A1F12;'  # rouge DCA
 
-    synth_display = synth.rename(columns={
-        'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
-        'ref_client': 'Ref dossier', 'client': 'Client CRM',
-        'commercial': 'Commercial', 'conducteur': 'Conducteur',
-        'agence': 'Agence',
-        'etat': 'État', 'solde': 'Solde (€)',
-        'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
-        'jours_retard': 'Jours retard'
-    })
-    styled = synth_display.style.map(_color_retard, subset=['Jours retard']) \
-        .format({'Solde (€)': '{:.2f}'})
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    # Split en 2 : chantiers en cours / chantiers livrés
+    f_en_cours = f[~f.get('est_livre', False)] if 'est_livre' in f.columns else f
+    f_livres = f[f.get('est_livre', False)] if 'est_livre' in f.columns \
+        else f.iloc[0:0]
 
-    # Sous-tableau Contentieux
+    # --- Synthèse Chantiers EN COURS ---
+    st.subheader("🏗️ Chantiers en cours")
+    if f_en_cours.empty:
+        st.caption("Aucun chantier en cours.")
+    else:
+        synth_ec = f_en_cours.groupby(
+            ['comp_aux_num', 'comp_aux_lib', 'ref_client',
+             'commercial', 'conducteur', 'etat'], dropna=False).agg(
+            solde=('solde', 'sum'),
+            nb=('piece_ref', 'count'),
+            derniere_ecriture=('ecriture_date', 'max'),
+            jours_retard=('jours_retard', 'max')
+        ).reset_index().sort_values('solde', ascending=False)
+
+        synth_ec_display = synth_ec.rename(columns={
+            'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
+            'ref_client': 'Ref dossier',
+            'commercial': 'Commercial', 'conducteur': 'Conducteur',
+            'etat': 'État', 'solde': 'Solde (€)',
+            'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
+            'jours_retard': 'Jours retard'
+        })
+        styled_ec = synth_ec_display.style.map(_color_retard, subset=['Jours retard']) \
+            .format({'Solde (€)': '{:.2f}'})
+        st.dataframe(styled_ec, use_container_width=True, hide_index=True)
+        st.caption(f"Total en cours : {f_en_cours['solde'].sum():,.0f} €"
+                   .replace(",", " "))
+
+    # --- Synthèse Chantiers LIVRÉS ---
+    st.subheader("🏠 Chantiers livrés")
+    if f_livres.empty:
+        st.caption("Aucun chantier livré avec créance ouverte.")
+    else:
+        synth_lv = f_livres.groupby(
+            ['comp_aux_num', 'comp_aux_lib', 'ref_client',
+             'commercial', 'conducteur', 'etat'], dropna=False).agg(
+            solde=('solde', 'sum'),
+            nb=('piece_ref', 'count'),
+            derniere_ecriture=('ecriture_date', 'max'),
+            jours_retard=('jours_retard', 'max'),
+            montant_consigne=('montant_consigne', 'first'),
+        ).reset_index().sort_values('solde', ascending=False)
+        synth_lv['solde_net'] = synth_lv['solde'] - synth_lv['montant_consigne'].fillna(0)
+
+        synth_lv_display = synth_lv.rename(columns={
+            'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
+            'ref_client': 'Ref dossier',
+            'commercial': 'Commercial', 'conducteur': 'Conducteur',
+            'etat': 'État', 'solde': 'Solde (€)',
+            'montant_consigne': 'Consigné huissier (€)',
+            'solde_net': 'Solde net (€)',
+            'nb': 'Nb lignes', 'derniere_ecriture': 'Dernière écriture',
+            'jours_retard': 'Jours retard'
+        })
+        styled_lv = synth_lv_display.style.map(_color_retard, subset=['Jours retard']) \
+            .format({'Solde (€)': '{:.2f}',
+                     'Consigné huissier (€)': '{:.2f}',
+                     'Solde net (€)': '{:.2f}'})
+        st.dataframe(styled_lv, use_container_width=True, hide_index=True)
+        st.caption(f"Total livrés : {f_livres['solde'].sum():,.0f} € · "
+                   f"Consigné : {synth_lv['montant_consigne'].sum():,.0f} € · "
+                   f"Net : {synth_lv['solde_net'].sum():,.0f} €"
+                   .replace(",", " "))
+
+    # --- Sous-tableau Contentieux ---
     if not f_contentieux.empty:
         st.subheader("⚖️ Dossiers en contentieux")
         synth_ct = f_contentieux.groupby(
-            ['comp_aux_num', 'comp_aux_lib', 'ref_client', 'client',
-             'responsable', 'commercial', 'agence'], dropna=False).agg(
+            ['comp_aux_num', 'comp_aux_lib', 'ref_client',
+             'responsable', 'commercial'], dropna=False).agg(
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
             derniere_ecriture=('ecriture_date', 'max'),
@@ -1137,10 +1272,9 @@ def page_creances():
         kd.metric("Prov. créances douteuses", f"{total_pcd:,.0f} €".replace(",", " "))
 
         synth_ct_display = synth_ct.rename(columns={
-            'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client FEC',
-            'ref_client': 'Ref dossier', 'client': 'Client CRM',
-            'responsable': 'Responsable',
-            'commercial': 'Commercial', 'agence': 'Agence',
+            'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
+            'ref_client': 'Ref dossier',
+            'responsable': 'Responsable', 'commercial': 'Commercial',
             'solde': 'Solde (€)', 'nb': 'Nb lignes',
             'derniere_ecriture': 'Dernière écriture',
             'jours_retard': 'Jours retard',
@@ -1156,13 +1290,13 @@ def page_creances():
     with st.expander("Détail ligne par ligne"):
         st.dataframe(
             f[['comp_aux_lib', 'piece_ref', 'ecriture_date', 'journal_code',
-               'ecriture_lib', 'debit', 'credit', 'solde', 'commercial', 'agence', 'etat']]
+               'ecriture_lib', 'debit', 'credit', 'solde', 'commercial', 'etat']]
             .rename(columns={
                 'comp_aux_lib': 'Client', 'piece_ref': 'Réf. pièce',
                 'ecriture_date': 'Date', 'journal_code': 'Journal',
                 'ecriture_lib': 'Libellé', 'debit': 'Débit',
                 'credit': 'Crédit', 'solde': 'Solde',
-                'commercial': 'Commercial', 'agence': 'Agence', 'etat': 'État'
+                'commercial': 'Commercial', 'etat': 'État'
             }),
             use_container_width=True, hide_index=True
         )
@@ -1253,22 +1387,38 @@ def page_notes():
     st.subheader("📌 Résumé direction (1 ligne par client)")
     df_res = read_sheet('resumes')
     cur_resume = ''
+    cur_action = ''
+    cur_resp = ''
     cur_resume_meta = ''
     if not df_res.empty and 'comp_aux_num' in df_res.columns:
         match = df_res[df_res['comp_aux_num'] == comp_aux_num]
         if not match.empty:
             cur_resume = str(match.iloc[0].get('resume', '') or '')
+            cur_action = str(match.iloc[0].get('action_resume', '') or '')
+            cur_resp = str(match.iloc[0].get('responsable_action', '') or '')
             cur_resume_meta = (f"Mis à jour le {match.iloc[0].get('date_maj', '')} "
                                f"par {match.iloc[0].get('auteur', '')}")
 
     with st.form("resume_form", clear_on_submit=False):
         new_resume = st.text_input(
-            "Résumé (max 100 caractères) — sera repris dans l'export Direction",
+            "Résumé (max 100 caractères) — repris dans l'export Direction",
             value=cur_resume, max_chars=100,
-            placeholder="Ex: Litige sur facture 26/0000123, attente expertise contradictoire"
+            placeholder="Ex: Litige sur facture 26/0000123, attente expertise"
+        )
+        ca, cr = st.columns(2)
+        new_action = ca.text_input(
+            "Action à mener (max 100 caractères)",
+            value=cur_action, max_chars=100,
+            placeholder="Ex: Relancer assurance, Saisine huissier..."
+        )
+        new_resp = cr.text_input(
+            "Responsable de l'action",
+            value=cur_resp,
+            placeholder="Ex: Jean Dupont"
         )
         resume_auteur = st.text_input(
-            "Auteur", value=st.session_state.get('last_auteur', ''),
+            "Auteur (qui rédige ce résumé)",
+            value=st.session_state.get('last_auteur', ''),
             key="resume_auteur")
         if cur_resume_meta:
             st.caption(cur_resume_meta)
@@ -1279,6 +1429,8 @@ def page_notes():
                 'comp_aux_num': comp_aux_num,
                 'ref_client': info.get('ref_client', ''),
                 'resume': new_resume.strip()[:100],
+                'action_resume': new_action.strip()[:100],
+                'responsable_action': new_resp.strip(),
                 'date_maj': datetime.now().strftime('%Y-%m-%d %H:%M'),
                 'auteur': resume_auteur,
             }])
@@ -1384,15 +1536,16 @@ def page_export():
             wb.remove(wb.active)
 
             ws = wb.create_sheet("Synthèse")
-            headers = ['Commercial', 'Agence', 'Client FEC', 'Ref dossier', 'Client CRM',
-                       'État', 'Solde dû (€)', 'Nb factures', 'Dernière relance', 'Nb relances']
+            headers = ['Commercial', 'Conducteur', 'Client', 'Ref dossier',
+                       'État', 'Solde dû (€)', 'Nb factures',
+                       'Dernière relance', 'Nb relances']
             ws.append(headers)
             for c in ws[1]:
                 _style_header(c)
 
             synth = df.merge(last_notes, on='comp_aux_num', how='left')
-            synth = synth.groupby(['commercial', 'agence', 'comp_aux_lib', 'ref_client',
-                                   'client', 'etat'], dropna=False).agg(
+            synth = synth.groupby(['commercial', 'conducteur', 'comp_aux_lib',
+                                   'ref_client', 'etat'], dropna=False).agg(
                 solde=('solde', 'sum'),
                 nb=('piece_ref', 'count'),
                 derniere_relance=('derniere_relance', 'max'),
@@ -1400,15 +1553,15 @@ def page_export():
             ).reset_index().sort_values('solde', ascending=False)
 
             for _, r in synth.iterrows():
-                ws.append([r['commercial'], r['agence'], r['comp_aux_lib'],
-                           r['ref_client'], r['client'], r['etat'],
+                ws.append([r['commercial'], r['conducteur'], r['comp_aux_lib'],
+                           r['ref_client'], r['etat'],
                            round(r['solde'], 2), r['nb'],
                            r['derniere_relance'], r['nb_relances'] or 0])
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            ws.cell(total_row, 7, f'=SUM(G2:G{total_row - 1})').font = Font(bold=True)
-            for row in ws.iter_rows(min_row=2, max_row=total_row, min_col=7, max_col=7):
+            ws.cell(total_row, 6, f'=SUM(F2:F{total_row - 1})').font = Font(bold=True)
+            for row in ws.iter_rows(min_row=2, max_row=total_row, min_col=6, max_col=6):
                 for c in row:
                     c.number_format = '#,##0.00 €'
             _autosize(ws)
@@ -1421,7 +1574,7 @@ def page_export():
                 safe = com[:31].replace('/', '-').replace('\\', '-')
                 ws = wb.create_sheet(safe)
                 headers = ['Client', 'Ref dossier', 'Réf. pièce', 'Date', 'Journal',
-                           'Libellé', 'Débit', 'Crédit', 'Solde', 'Agence', 'État']
+                           'Libellé', 'Débit', 'Crédit', 'Solde', 'État']
                 ws.append(headers)
                 for c in ws[1]:
                     _style_header(c)
@@ -1429,7 +1582,7 @@ def page_export():
                     ws.append([r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
                                r['ecriture_date'], r['journal_code'], r['ecriture_lib'],
                                round(r['debit'], 2), round(r['credit'], 2),
-                               round(r['solde'], 2), r['agence'], r['etat']])
+                               round(r['solde'], 2), r['etat']])
                 last = ws.max_row + 1
                 ws.cell(last, 1, 'TOTAL').font = Font(bold=True)
                 ws.cell(last, 9, f'=SUM(I2:I{last - 1})').font = Font(bold=True)
@@ -1518,16 +1671,16 @@ def page_export():
 
                 # Feuille de synthèse
                 ws = wb.create_sheet("Synthèse")
-                headers = ['Responsable', 'Client FEC', 'Ref dossier', 'Client CRM',
-                           'Commercial', 'Agence', 'Solde (€)', 'Nb factures',
+                headers = ['Responsable', 'Client', 'Ref dossier',
+                           'Commercial', 'Solde (€)', 'Nb factures',
                            'Jours retard max', 'Dernière écriture']
                 ws.append(headers)
                 for c in ws[1]:
                     _style_header(c)
 
                 synth_ct = df_ctx.groupby(
-                    ['responsable', 'comp_aux_lib', 'ref_client', 'client',
-                     'commercial', 'agence'], dropna=False).agg(
+                    ['responsable', 'comp_aux_lib', 'ref_client',
+                     'commercial'], dropna=False).agg(
                     solde=('solde', 'sum'),
                     nb=('piece_ref', 'count'),
                     jours=('jours_retard', 'max'),
@@ -1537,16 +1690,16 @@ def page_export():
 
                 for _, r in synth_ct.iterrows():
                     ws.append([r['responsable'], r['comp_aux_lib'], r['ref_client'],
-                               r['client'], r['commercial'], r['agence'],
+                               r['commercial'],
                                round(r['solde'], 2), r['nb'],
                                int(r['jours']) if pd.notna(r['jours']) else '',
                                r['derniere']])
 
                 total_row = ws.max_row + 1
                 ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-                ws.cell(total_row, 7, f'=SUM(G2:G{total_row - 1})').font = Font(bold=True)
+                ws.cell(total_row, 5, f'=SUM(E2:E{total_row - 1})').font = Font(bold=True)
                 for row in ws.iter_rows(min_row=2, max_row=total_row,
-                                         min_col=7, max_col=7):
+                                         min_col=5, max_col=5):
                     for c in row:
                         c.number_format = '#,##0.00 €'
                 _autosize(ws)
@@ -1562,7 +1715,7 @@ def page_export():
                     ws = wb.create_sheet(safe)
                     headers = ['Client', 'Ref dossier', 'Réf. pièce', 'Date',
                                'Journal', 'Libellé', 'Débit', 'Crédit', 'Solde',
-                               'Jours retard', 'Commercial', 'Agence']
+                               'Jours retard', 'Commercial']
                     ws.append(headers)
                     for c in ws[1]:
                         _style_header(c)
@@ -1573,7 +1726,7 @@ def page_export():
                                    round(r['debit'], 2), round(r['credit'], 2),
                                    round(r['solde'], 2),
                                    int(r.get('jours_retard', 0) or 0),
-                                   r['commercial'], r['agence']])
+                                   r['commercial']])
                     last = ws.max_row + 1
                     ws.cell(last, 1, 'TOTAL').font = Font(bold=True)
                     ws.cell(last, 9, f'=SUM(I2:I{last - 1})').font = Font(bold=True)
@@ -1603,29 +1756,39 @@ def page_export():
             # Récupère le résumé direction (1 par client) depuis la feuille dédiée
             df_resumes = read_sheet('resumes')
             last_resume = pd.DataFrame(columns=['comp_aux_num', 'note_resume',
+                                                 'action_resume',
+                                                 'responsable_action',
                                                  'date_note', 'auteur'])
             if not df_resumes.empty and 'comp_aux_num' in df_resumes.columns:
-                last_resume = df_resumes.rename(columns={
+                resumes_renamed = df_resumes.rename(columns={
                     'resume': 'note_resume',
                     'date_maj': 'date_note',
-                })[['comp_aux_num', 'note_resume', 'date_note', 'auteur']] \
-                    .drop_duplicates('comp_aux_num')
+                })
+                # Ajoute les colonnes manquantes si schéma ancien
+                for col in ('action_resume', 'responsable_action'):
+                    if col not in resumes_renamed.columns:
+                        resumes_renamed[col] = ''
+                last_resume = resumes_renamed[
+                    ['comp_aux_num', 'note_resume', 'action_resume',
+                     'responsable_action', 'date_note', 'auteur']
+                ].drop_duplicates('comp_aux_num')
 
-            # Synthèse globale (créances ouvertes hors Hors CRM)
-            df_dir = df_all.copy()  # toutes les créances ouvertes (y.c. contentieux)
+            # Synthèse globale (créances ouvertes y compris contentieux)
+            df_dir = df_all.copy()
 
             ws = wb.create_sheet("Synthèse Direction")
-            headers = ['Client', 'Commercial',
-                       'Conducteur', 'Agence', 'État',
-                       'Solde dû (€)', 'Jours retard max', 'Statut',
+            headers = ['Client', 'Commercial', 'Conducteur', 'État',
+                       'Solde dû (€)', 'Consigné huissier (€)', 'Solde net (€)',
+                       'Jours retard max', 'Statut',
                        'Prov. risque (€)', 'Prov. créances douteuses (€)',
-                       'Dernier résumé', 'Date résumé', 'Auteur résumé']
+                       'Résumé', 'Action à mener', 'Responsable action',
+                       'Date MAJ', 'Auteur résumé']
             ws.append(headers)
             for c in ws[1]:
                 _style_header(c)
 
             synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib',
-                                       'commercial', 'conducteur', 'agence',
+                                       'commercial', 'conducteur',
                                        'etat'], dropna=False).agg(
                 solde=('solde', 'sum'),
                 jours=('jours_retard', 'max'),
@@ -1633,32 +1796,40 @@ def page_export():
                 provision_risque=('provision_risque', 'first'),
                 provision_creances_douteuses=('provision_creances_douteuses',
                                                 'first'),
+                montant_consigne=('montant_consigne', 'first'),
             ).reset_index().sort_values('solde', ascending=False)
 
             synth_d = synth_d.merge(last_resume, on='comp_aux_num', how='left')
 
             for _, r in synth_d.iterrows():
                 statut = "⚖️ Contentieux" if r['contentieux'] else "Suivi commercial"
+                consigne = float(r.get('montant_consigne', 0) or 0)
+                solde_brut = float(r['solde'] or 0)
+                solde_net = solde_brut - consigne
                 ws.append([
                     r['comp_aux_lib'],
-                    r['commercial'], r['conducteur'], r['agence'], r['etat'],
-                    round(r['solde'], 2),
+                    r['commercial'], r['conducteur'], r['etat'],
+                    round(solde_brut, 2),
+                    round(consigne, 2),
+                    round(solde_net, 2),
                     int(r['jours']) if pd.notna(r['jours']) else '',
                     statut,
                     round(r['provision_risque'] or 0, 2),
                     round(r['provision_creances_douteuses'] or 0, 2),
                     r.get('note_resume', '') or '',
+                    r.get('action_resume', '') or '',
+                    r.get('responsable_action', '') or '',
                     r.get('date_note', '') or '',
                     r.get('auteur', '') or '',
                 ])
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            # Solde dû = colonne F (6), Prov risque = I (9), Prov creances douteuses = J (10)
-            ws.cell(total_row, 6, f'=SUM(F2:F{total_row - 1})').font = Font(bold=True)
-            ws.cell(total_row, 9, f'=SUM(I2:I{total_row - 1})').font = Font(bold=True)
-            ws.cell(total_row, 10, f'=SUM(J2:J{total_row - 1})').font = Font(bold=True)
-            for col_idx in (6, 9, 10):
+            # E=Solde, F=Consigné, G=Solde net, J=Prov risque, K=Prov créances douteuses
+            for col_idx in (5, 6, 7, 10, 11):
+                ws.cell(total_row, col_idx,
+                        f'=SUM({get_column_letter(col_idx)}2:'
+                        f'{get_column_letter(col_idx)}{total_row - 1})').font = Font(bold=True)
                 for row in ws.iter_rows(min_row=2, max_row=total_row,
                                          min_col=col_idx, max_col=col_idx):
                     for c in row:
