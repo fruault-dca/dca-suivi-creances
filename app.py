@@ -246,6 +246,9 @@ def to_float(val):
 def to_str(val):
     if pd.isna(val) or val is None or str(val).lower() == 'nan':
         return ''
+    # float entier → int (évite "830.0" pour un code dossier)
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
     return str(val).strip()
 
 
@@ -645,6 +648,8 @@ def page_import():
                     return s
 
                 # Détection auto de la ligne d'en-tête (cherche "n° facture" ou similaire)
+                # On lit SANS dtype=str pour préserver les types datetime des dates Excel,
+                # puis on convertit en str colonne par colonne après détection.
                 df_map = None
                 detected_header = None
                 for header_row in range(0, 5):
@@ -653,7 +658,7 @@ def page_import():
                             tmp = pd.read_csv(map_file, dtype=str, header=header_row)
                         else:
                             map_file.seek(0)
-                            tmp = pd.read_excel(map_file, dtype=str, header=header_row)
+                            tmp = pd.read_excel(map_file, header=header_row)
                         norm_cols = [normalize(c) for c in tmp.columns]
                         if any(c in aliases_piece for c in norm_cols) and \
                            any(c in aliases_ref for c in norm_cols):
@@ -680,21 +685,25 @@ def page_import():
                             + (f", date=`{col_date}`" if col_date else ""))
 
                     def _fmt_date(v):
-                        """Parse une date Excel (serial, datetime, str DD/MM/YYYY...) vers YYYY-MM-DD."""
-                        if v is None:
+                        """Parse une date (Timestamp, serial Excel, str DD/MM/YYYY) vers YYYY-MM-DD."""
+                        if v is None or pd.isna(v):
                             return ''
+                        # Cas 1 : déjà un Timestamp/datetime (lecture Excel sans dtype=str)
+                        if isinstance(v, (pd.Timestamp, datetime)):
+                            return v.date().isoformat() if hasattr(v, 'date') \
+                                else pd.Timestamp(v).date().isoformat()
                         s = str(v).strip()
                         if s == '' or s.lower() == 'nan':
                             return ''
-                        # Cas 1 : numéro de série Excel (ex "45870" = 01/08/2025)
+                        # Cas 2 : numéro de série Excel (ex 45870 = 01/08/2025)
                         try:
                             n = float(s.replace(',', '.'))
-                            if 20000 < n < 80000:  # plage raisonnable (1954-2119)
+                            if 20000 < n < 80000:
                                 d = pd.Timestamp('1899-12-30') + pd.Timedelta(days=n)
                                 return d.date().isoformat()
                         except (ValueError, TypeError):
                             pass
-                        # Cas 2 : chaîne lisible — on tente avec dayfirst=True
+                        # Cas 3 : chaîne — on tente avec dayfirst=True
                         try:
                             d = pd.to_datetime(s, errors='coerce', dayfirst=True)
                             if pd.isna(d):
