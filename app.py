@@ -1543,72 +1543,81 @@ def page_export():
                                        "Export Contentieux", "Export Direction"])
 
     with tab1:
-        st.markdown("Classeur Excel avec synthèse + une feuille par commercial + relances.")
-        if not df_ctx.empty:
-            st.caption(f"ℹ️ {df_ctx['ref_client'].nunique()} dossier(s) en contentieux "
-                       f"exclu(s) de cet export.")
+        st.markdown("Classeur Excel : 1 feuille par commercial avec **uniquement les "
+                    "chantiers en cours** (livrés et contentieux exclus). "
+                    "Détail facture par facture avec jours depuis émission colorés.")
+
+        # Filtre : uniquement chantiers en cours (livrés exclus, contentieux déjà exclu)
+        df_ec = df[~df.get('est_livre', False)] if 'est_livre' in df.columns else df
+
+        nb_excl_livres = df['est_livre'].sum() if 'est_livre' in df.columns else 0
+        if nb_excl_livres or not df_ctx.empty:
+            msgs = []
+            if not df_ctx.empty:
+                msgs.append(f"{df_ctx['ref_client'].nunique()} dossier(s) contentieux")
+            if nb_excl_livres:
+                msgs.append(f"{nb_excl_livres} ligne(s) chantier livré")
+            st.caption("ℹ️ Exclus de cet export : " + ", ".join(msgs))
+
         if st.button("🔧 Générer l'export commerciaux", type="primary"):
             wb = openpyxl.Workbook()
             wb.remove(wb.active)
 
-            ws = wb.create_sheet("Synthèse")
-            headers = ['Commercial', 'Conducteur', 'Client', 'Ref dossier',
-                       'État', 'Solde dû (€)', 'Nb factures',
-                       'Dernière relance', 'Nb relances']
-            ws.append(headers)
-            for c in ws[1]:
-                _style_header(c)
+            # Couleurs jours depuis facture (charte DCA) :
+            # vert <7, orange 7-15, rouge >15
+            def _fill_jours(j):
+                try:
+                    j = int(j)
+                except Exception:
+                    return None
+                if j <= 0:
+                    return None
+                if j < 7:
+                    return PatternFill('solid', start_color='C0DD97')   # vert
+                if j <= 15:
+                    return PatternFill('solid', start_color='F5D7A8')   # orange
+                return PatternFill('solid', start_color='F5BEB6')        # rouge
 
-            synth = df.merge(last_notes, on='comp_aux_num', how='left')
-            synth = synth.groupby(['commercial', 'conducteur', 'comp_aux_lib',
-                                   'ref_client', 'etat'], dropna=False).agg(
-                solde=('solde', 'sum'),
-                nb=('piece_ref', 'count'),
-                derniere_relance=('derniere_relance', 'max'),
-                nb_relances=('nb_relances', 'max')
-            ).reset_index().sort_values('solde', ascending=False)
-
-            for _, r in synth.iterrows():
-                ws.append([r['commercial'], r['conducteur'], r['comp_aux_lib'],
-                           r['ref_client'], r['etat'],
-                           round(r['solde'], 2), r['nb'],
-                           r['derniere_relance'], r['nb_relances'] or 0])
-
-            total_row = ws.max_row + 1
-            ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            ws.cell(total_row, 6, f'=SUM(F2:F{total_row - 1})').font = Font(bold=True)
-            for row in ws.iter_rows(min_row=2, max_row=total_row, min_col=6, max_col=6):
-                for c in row:
-                    c.number_format = '#,##0.00 €'
-            _autosize(ws)
-            ws.freeze_panes = 'A2'
-
-            for com in sorted(df['commercial'].dropna().unique()):
+            # Une feuille par commercial — uniquement détail des factures non soldées
+            for com in sorted(df_ec['commercial'].dropna().unique()):
                 if not com:
                     continue
-                df_c = df[df['commercial'] == com].sort_values(['comp_aux_lib', 'ecriture_date'])
+                df_c = df_ec[df_ec['commercial'] == com] \
+                    .sort_values(['comp_aux_lib', 'date_facture_eff'])
+                if df_c.empty:
+                    continue
                 safe = com[:31].replace('/', '-').replace('\\', '-')
                 ws = wb.create_sheet(safe)
-                headers = ['Client', 'Ref dossier', 'Réf. pièce', 'Date', 'Journal',
-                           'Libellé', 'Débit', 'Crédit', 'Solde', 'État']
+                headers = ['Client', 'Ref dossier', 'N° facture',
+                           'Date facture', 'Libellé', 'Solde dû (€)',
+                           'Jours depuis facture', 'État']
                 ws.append(headers)
                 for c in ws[1]:
                     _style_header(c)
+
                 for _, r in df_c.iterrows():
-                    ws.append([r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
-                               r['ecriture_date'], r['journal_code'], r['ecriture_lib'],
-                               round(r['debit'], 2), round(r['credit'], 2),
-                               round(r['solde'], 2), r['etat']])
+                    jours = int(r.get('jours_retard', 0) or 0)
+                    ws.append([
+                        r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
+                        r.get('date_facture_eff', '') or r['ecriture_date'],
+                        r['ecriture_lib'],
+                        round(r['solde'], 2),
+                        jours, r['etat']
+                    ])
+                    fill = _fill_jours(jours)
+                    if fill is not None:
+                        ws.cell(ws.max_row, 7).fill = fill
+
                 last = ws.max_row + 1
                 ws.cell(last, 1, 'TOTAL').font = Font(bold=True)
-                ws.cell(last, 9, f'=SUM(I2:I{last - 1})').font = Font(bold=True)
-                for row in ws.iter_rows(min_row=2, max_row=last, min_col=7, max_col=9):
+                ws.cell(last, 6, f'=SUM(F2:F{last - 1})').font = Font(bold=True)
+                for row in ws.iter_rows(min_row=2, max_row=last, min_col=6, max_col=6):
                     for c in row:
                         c.number_format = '#,##0.00 €'
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
-            non_map = df[df['commercial'].fillna('') == '']
+            non_map = df_ec[df_ec['commercial'].fillna('') == '']
             if not non_map.empty:
                 ws = wb.create_sheet("Non rattachés")
                 ws.append(['Client FEC', 'Code compta', 'Réf. pièce', 'Date',
