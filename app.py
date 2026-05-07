@@ -397,6 +397,24 @@ def load_creances_enrichies(only_open=True):
     else:
         df_c['ref_client'] = ''
 
+    # Propagation : si un client a au moins une facture avec une vraie ref CRM,
+    # toutes ses autres factures Hors CRM héritent de cette ref
+    # (cas typique : client en contentieux dont seules certaines factures sont
+    # passées en PROGEMI, les autres ont été marquées Hors CRM par erreur)
+    if 'ref_client' in df_c.columns:
+        mask_hors = df_c['ref_client'] == '__HORS_CRM__'
+        real_refs = df_c[
+            ~mask_hors
+            & df_c['ref_client'].fillna('').astype(bool)
+            & (df_c['ref_client'] != '__HORS_CRM__')
+        ].drop_duplicates('comp_aux_num')[['comp_aux_num', 'ref_client']] \
+         .rename(columns={'ref_client': '_ref_real'})
+        if not real_refs.empty:
+            df_c = df_c.merge(real_refs, on='comp_aux_num', how='left')
+            propagate = mask_hors & df_c['_ref_real'].fillna('').astype(bool)
+            df_c.loc[propagate, 'ref_client'] = df_c.loc[propagate, '_ref_real']
+            df_c = df_c.drop(columns=['_ref_real'])
+
     if not df_d.empty:
         dos_cols = ['ref_client', 'client', 'commercial', 'conducteur', 'agence', 'etat',
                     'stade', 'contrat_ttc', 'date_reception']
@@ -424,10 +442,10 @@ def load_creances_enrichies(only_open=True):
                     'contrat_ttc', 'date_reception']:
             df_c[col] = ''
 
-    # Marque les factures Hors CRM pour les distinguer des non-rattachées
-    mask_hors = df_c['ref_client'] == '__HORS_CRM__'
-    df_c.loc[mask_hors, 'ref_client'] = 'Hors CRM'
-    df_c.loc[mask_hors, 'client'] = df_c.loc[mask_hors, 'comp_aux_lib']
+    # Pour les vrais Hors CRM (pas de CRM connue), affichage "Hors CRM"
+    mask_hors_final = df_c['ref_client'] == '__HORS_CRM__'
+    df_c.loc[mask_hors_final, 'ref_client'] = 'Hors CRM'
+    df_c.loc[mask_hors_final, 'client'] = df_c.loc[mask_hors_final, 'comp_aux_lib']
 
     # Jours de retard : priorité à la date de facture du PROGEMI (date_facture),
     # puis piece_date du FEC, puis fallback ecriture_date
