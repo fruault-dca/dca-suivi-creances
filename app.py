@@ -385,10 +385,14 @@ def load_creances_enrichies(only_open=True):
             map_cols.append('date_facture')
         df_m2 = df_m[map_cols].copy()
         df_m2['_pk'] = df_m2['piece_ref'].apply(norm_piece)
+        # Priorité aux refs réelles sur "__HORS_CRM__" en cas de doublon de _pk
+        df_m2['_priority'] = (df_m2['ref_client'] != '__HORS_CRM__').astype(int)
+        df_m2 = df_m2.sort_values('_priority', ascending=False) \
+            .drop_duplicates('_pk')
         keep_cols = ['_pk', 'ref_client']
         if 'date_facture' in df_m2.columns:
             keep_cols.append('date_facture')
-        df_m2 = df_m2.drop_duplicates('_pk')[keep_cols]
+        df_m2 = df_m2[keep_cols]
         df_c = df_c.merge(df_m2, on='_pk', how='left').drop(columns=['_pk'])
     else:
         df_c['ref_client'] = ''
@@ -791,8 +795,15 @@ def page_import():
                     if mode.startswith("Ajouter"):
                         existing = read_sheet('mapping')
                         if not existing.empty:
-                            # Upsert : on retire les piece_ref déjà présentes, on ajoute les nouvelles
-                            existing = existing[~existing['piece_ref'].isin(new_df['piece_ref'])]
+                            # Upsert sur clé normalisée (gère 23/265 vs 23/0000265)
+                            def _np(s):
+                                s = str(s or '').strip()
+                                if not s:
+                                    return ''
+                                return '/'.join(p.lstrip('0') or '0' for p in s.split('/'))
+                            new_keys = set(new_df['piece_ref'].apply(_np))
+                            existing = existing[~existing['piece_ref']
+                                                 .apply(_np).isin(new_keys)]
                             merged = pd.concat([existing, new_df], ignore_index=True)
                         else:
                             merged = new_df
