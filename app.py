@@ -396,8 +396,25 @@ def load_creances_enrichies(only_open=True):
     if not df_d.empty:
         dos_cols = ['ref_client', 'client', 'commercial', 'conducteur', 'agence', 'etat',
                     'stade', 'contrat_ttc', 'date_reception']
-        df_d_small = df_d[[c for c in dos_cols if c in df_d.columns]]
-        df_c = df_c.merge(df_d_small, on='ref_client', how='left')
+        df_d_small = df_d[[c for c in dos_cols if c in df_d.columns]].copy()
+
+        # Match tolérant aux zéros de tête : "549" matche "00549"
+        # On crée une clé normalisée des deux côtés et on fait le merge dessus.
+        import re as _re_d
+        def _norm_ref(s):
+            s = str(s or '').strip()
+            if not s:
+                return ''
+            # Pour les refs groupées CRM "830/831", on prend la version brute (sans zéros)
+            parts = _re_d.split(r'[/,;]+', s)
+            return '/'.join(p.strip().lstrip('0') or '0' for p in parts if p.strip())
+
+        df_c['_rk'] = df_c['ref_client'].apply(_norm_ref)
+        df_d_small['_rk'] = df_d_small['ref_client'].apply(_norm_ref)
+        # Conserve la ref CRM d'origine, ignore le doublon ref_client de df_d_small
+        df_d_small = df_d_small.drop(columns=['ref_client']) \
+            .drop_duplicates('_rk')
+        df_c = df_c.merge(df_d_small, on='_rk', how='left').drop(columns=['_rk'])
     else:
         for col in ['client', 'commercial', 'conducteur', 'agence', 'etat', 'stade',
                     'contrat_ttc', 'date_reception']:
