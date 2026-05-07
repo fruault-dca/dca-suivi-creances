@@ -1266,6 +1266,7 @@ def page_creances():
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
             derniere_facture=('date_facture_eff', 'max'),
+            date_livraison=('date_reception', 'first'),
             jours_retard=('jours_retard', 'max'),
             montant_consigne=('montant_consigne', 'first'),
         ).reset_index().sort_values('solde', ascending=False)
@@ -1288,6 +1289,7 @@ def page_creances():
             'montant_consigne': 'Consigné huissier (€)',
             'solde_net': 'Solde net (€)',
             'nb': 'Nb lignes', 'derniere_facture': 'Dernière facture',
+            'date_livraison': 'Date livraison',
             'jours_retard': 'Jours retard'
         })
         styled_lv = synth_lv_display.style.map(_color_retard, subset=['Jours retard']) \
@@ -1305,6 +1307,7 @@ def page_creances():
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
             derniere_facture=('date_facture_eff', 'max'),
+            date_livraison=('date_reception', 'first'),
             jours_retard=('jours_retard', 'max'),
             provision_risque=('provision_risque', 'first'),
             provision_creances_douteuses=('provision_creances_douteuses', 'first'),
@@ -1329,6 +1332,7 @@ def page_creances():
             'responsable': 'Responsable', 'commercial': 'Commercial',
             'solde': 'Solde (€)', 'nb': 'Nb lignes',
             'derniere_facture': 'Dernière facture',
+            'date_livraison': 'Date livraison',
             'jours_retard': 'Jours retard',
             'montant_consigne': 'Consigné huissier (€)',
             'provision_risque': 'Prov. risque (€)',
@@ -1841,6 +1845,7 @@ def page_export():
 
             ws = wb.create_sheet("Synthèse Direction")
             headers = ['Client', 'Commercial', 'Conducteur', 'État',
+                       'Date livraison',
                        'Solde dû (€)', 'Consigné huissier (€)', 'Solde net (€)',
                        'Jours retard max', 'Statut',
                        'Prov. risque (€)', 'Prov. créances douteuses (€)',
@@ -1860,6 +1865,7 @@ def page_export():
                 provision_creances_douteuses=('provision_creances_douteuses',
                                                 'first'),
                 montant_consigne=('montant_consigne', 'first'),
+                date_livraison=('date_reception', 'first'),
             ).reset_index().sort_values('solde', ascending=False)
 
             synth_d = synth_d.merge(last_resume, on='comp_aux_num', how='left')
@@ -1872,6 +1878,7 @@ def page_export():
                 ws.append([
                     r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['etat'],
+                    r.get('date_livraison', '') or '',
                     round(solde_brut, 2),
                     round(consigne, 2),
                     round(solde_net, 2),
@@ -1888,8 +1895,8 @@ def page_export():
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            # E=Solde, F=Consigné, G=Solde net, J=Prov risque, K=Prov créances douteuses
-            for col_idx in (5, 6, 7, 10, 11):
+            # F=Solde, G=Consigné, H=Solde net, K=Prov risque, L=Prov créances douteuses
+            for col_idx in (6, 7, 8, 11, 12):
                 ws.cell(total_row, col_idx,
                         f'=SUM({get_column_letter(col_idx)}2:'
                         f'{get_column_letter(col_idx)}{total_row - 1})').font = Font(bold=True)
