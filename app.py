@@ -432,7 +432,10 @@ def load_creances_enrichies(only_open=True):
 
     # Flag chantier livré : si date_reception est renseignée
     if 'date_reception' in df_c.columns:
-        df_c['est_livre'] = df_c['date_reception'].fillna('').astype(str).str.strip() != ''
+        # Nettoie la date de réception : "2025-08-01 00:00:00" -> "2025-08-01"
+        df_c['date_reception'] = df_c['date_reception'].fillna('').astype(str) \
+            .str.split(' ').str[0].str.strip()
+        df_c['est_livre'] = df_c['date_reception'] != ''
     else:
         df_c['est_livre'] = False
 
