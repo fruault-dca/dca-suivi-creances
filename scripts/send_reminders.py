@@ -50,7 +50,7 @@ def read_sheet(ss, name):
     return pd.DataFrame(ws.get_all_records())
 
 
-def render_html(nom, en_retard, urgent, app_url):
+def render_html(nom, en_retard, urgent, a_venir, sans_ech, app_url):
     css = """
     <style>
       body { font-family: 'Segoe UI', sans-serif; color: #2C3E50; }
@@ -63,6 +63,10 @@ def render_html(nom, en_retard, urgent, app_url):
                       border-radius: 4px; font-weight: 600; }
       .badge-urgent { background: #F5D7A8; color: #8B5A00; padding: 2px 8px;
                       border-radius: 4px; font-weight: 600; }
+      .badge-venir { background: #C0DD97; color: #355A10; padding: 2px 8px;
+                     border-radius: 4px; font-weight: 600; }
+      .badge-noech { background: #E0E0E0; color: #444; padding: 2px 8px;
+                     border-radius: 4px; font-weight: 600; }
       .footer { margin-top: 32px; font-size: 12px; color: #888; }
       .cta { display: inline-block; background: #60A020; color: white;
              padding: 10px 18px; border-radius: 6px; text-decoration: none;
@@ -106,18 +110,22 @@ def render_html(nom, en_retard, urgent, app_url):
         </table>
         """
 
-    nb_retard = len(en_retard)
-    nb_urgent = len(urgent)
     cta = (f'<a class="cta" href="{app_url}">Ouvrir l\'application</a>'
            if app_url else "")
 
     sections = ""
-    if nb_retard:
-        sections += f"<h2>🔴 En retard ({nb_retard})</h2>" + \
+    if not en_retard.empty:
+        sections += f"<h2>🔴 En retard ({len(en_retard)})</h2>" + \
             render_table(en_retard, "badge-retard", "En retard")
-    if nb_urgent:
-        sections += f"<h2>🟠 À traiter sous {J_URGENT} jours ({nb_urgent})</h2>" + \
+    if not urgent.empty:
+        sections += f"<h2>🟠 À traiter sous {J_URGENT} jours ({len(urgent)})</h2>" + \
             render_table(urgent, "badge-urgent", "Bientôt")
+    if not a_venir.empty:
+        sections += f"<h2>🟢 À venir ({len(a_venir)})</h2>" + \
+            render_table(a_venir, "badge-venir", "À venir")
+    if not sans_ech.empty:
+        sections += f"<h2>⚪ Sans échéance ({len(sans_ech)})</h2>" + \
+            render_table(sans_ech, "badge-noech", "Sans date")
 
     return f"""
     <html><head>{css}</head>
@@ -195,6 +203,8 @@ def main():
         en_retard = mes_notes[mes_notes["_jours_avant"] < 0]
         urgent = mes_notes[(mes_notes["_jours_avant"] >= 0)
                             & (mes_notes["_jours_avant"] <= J_URGENT)]
+        a_venir = mes_notes[mes_notes["_jours_avant"] > J_URGENT]
+        sans_ech = mes_notes[mes_notes["_ech"].isna()]
 
         if en_retard.empty and urgent.empty and not force:
             print(f"[skip] {email} : aucune tâche urgente.")
@@ -205,9 +215,11 @@ def main():
             subject_parts.append(f"{len(en_retard)} en retard")
         if not urgent.empty:
             subject_parts.append(f"{len(urgent)} sous {J_URGENT} jours")
+        if not subject_parts:
+            subject_parts.append(f"{len(mes_notes)} tâche(s) en cours")
         subject = "[Suivi créances] " + " · ".join(subject_parts)
 
-        html = render_html(nom, en_retard, urgent, app_url)
+        html = render_html(nom, en_retard, urgent, a_venir, sans_ech, app_url)
         try:
             send_email(email, nom, subject, html, smtp_user, smtp_pwd)
             print(f"[ok] envoyé à {email} ({len(en_retard)} retard, {len(urgent)} urgent)")
