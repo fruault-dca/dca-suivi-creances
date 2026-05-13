@@ -1,0 +1,43 @@
+name: Envoi des rappels quotidiens
+
+on:
+  schedule:
+    # Tous les jours à 06:00 UTC = 08:00 Paris (heure d'hiver) / 08:00 = 06:00 UTC l'été aussi
+    - cron: "0 6 * * 1-5"  # Lundi à vendredi
+  workflow_dispatch:
+    # Permet le déclenchement manuel depuis l'onglet Actions de GitHub
+    inputs:
+      force:
+        description: "Envoyer même sans tâche urgente (test)"
+        required: false
+        default: "0"
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install gspread google-auth pandas
+
+      - name: Run reminders script
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          APP_URL: ${{ secrets.APP_URL }}
+          FORCE_SEND: ${{ github.event.inputs.force }}
+        run: python scripts/send_reminders.py
