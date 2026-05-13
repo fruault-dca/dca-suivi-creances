@@ -72,7 +72,8 @@ HEADERS = {
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
     'mapping': ['piece_ref', 'ref_client', 'comp_aux_num', 'date_facture'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
-              'action', 'echeance', 'statut'],
+              'action', 'echeance', 'statut', 'assigne_a'],
+    'users': ['email', 'nom_affichage', 'actif'],
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
                     'date_passage', 'commentaire',
                     'provision_risque', 'provision_creances_douteuses'],
@@ -219,6 +220,45 @@ def next_id(df):
 # ============================================================
 # VÉRIFICATION DE LA CONFIG
 # ============================================================
+def current_user():
+    """Retourne l'utilisateur courant sous forme {email, nom}.
+
+    Priorité :
+    1. Streamlit viewer authentication (st.experimental_user.email)
+    2. Sélection manuelle stockée en session_state (fallback dev/local)
+    """
+    # Tentative Streamlit auth
+    try:
+        u = st.experimental_user
+        email = getattr(u, 'email', None)
+        if email:
+            df_users = read_sheet('users')
+            nom = email
+            if not df_users.empty:
+                match = df_users[df_users['email'] == email]
+                if not match.empty:
+                    nom = match.iloc[0].get('nom_affichage', email) or email
+            return {'email': email, 'nom': nom}
+    except Exception:
+        pass
+    # Fallback : sélection manuelle
+    if 'manual_user' in st.session_state:
+        return st.session_state['manual_user']
+    return None
+
+
+def get_active_users():
+    """Liste des utilisateurs actifs (depuis la feuille users)."""
+    df_users = read_sheet('users')
+    if df_users.empty:
+        return []
+    df_users = df_users[df_users.get('actif', 'oui').astype(str).str.lower()
+                          .isin(['oui', 'true', '1', 'yes', ''])]
+    return [{'email': r['email'],
+             'nom': r.get('nom_affichage', r['email']) or r['email']}
+            for _, r in df_users.iterrows() if r.get('email')]
+
+
 def check_config():
     try:
         if "gcp_service_account" not in st.secrets:
@@ -533,9 +573,9 @@ def load_creances_enrichies(only_open=True):
 def page_import():
     st.header("📥 Import des données")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "FEC", "CRM (Chantiers)", "Mapping factures",
-        "Contentieux", "Consignations huissier"])
+        "Contentieux", "Consignations huissier", "Utilisateurs"])
 
     with tab1:
         st.markdown("**Import du Fichier d'Écritures Comptables**")
@@ -1192,6 +1232,64 @@ def page_import():
                     replace_sheet('consignations', df_cons_cleaned)
                     st.rerun()
 
+    with tab6:
+        st.markdown("**Gestion des utilisateurs**")
+        st.caption("Les utilisateurs ajoutés ici peuvent être sélectionnés "
+                   "dans la sidebar et recevoir des tâches assignées.")
+
+        df_u = read_sheet('users')
+
+        st.markdown("### Ajouter / mettre à jour un utilisateur")
+        cu1, cu2, cu3 = st.columns([3, 3, 1])
+        new_email = cu1.text_input("Email", key="u_email",
+                                    placeholder="nom@designconstructions.com")
+        new_nom = cu2.text_input("Nom affiché", key="u_nom",
+                                  placeholder="Prénom Nom")
+        new_actif = cu3.selectbox("Actif", ["oui", "non"], key="u_actif")
+
+        if st.button("➕ Enregistrer", type="primary"):
+            if not new_email.strip() or '@' not in new_email:
+                st.warning("Email invalide.")
+            elif not new_nom.strip():
+                st.warning("Le nom est obligatoire.")
+            else:
+                new_row = pd.DataFrame([{
+                    'email': new_email.strip().lower(),
+                    'nom_affichage': new_nom.strip(),
+                    'actif': new_actif,
+                }])
+                if df_u.empty:
+                    merged = new_row
+                else:
+                    # Upsert sur email
+                    merged = df_u[df_u['email'].astype(str).str.lower()
+                                  != new_email.strip().lower()]
+                    merged = pd.concat([merged, new_row], ignore_index=True)
+                replace_sheet('users', merged)
+                st.success(f"✅ Utilisateur enregistré : {new_nom}")
+                st.rerun()
+
+        st.markdown("### Utilisateurs enregistrés")
+        if df_u.empty:
+            st.info("Aucun utilisateur. Ajoutez-en un avec le formulaire ci-dessus.")
+        else:
+            for i_u, r in df_u.iterrows():
+                cc1, cc2, cc3, cc4 = st.columns([3, 3, 1, 1])
+                cc1.write(f"**{r.get('nom_affichage', '')}**")
+                cc1.caption(r.get('email', ''))
+                actif = str(r.get('actif', 'oui')).lower() in (
+                    'oui', 'true', '1', 'yes', '')
+                cc2.write("🟢 Actif" if actif else "🔴 Inactif")
+                if cc3.button("🔄", key=f"toggle_u_{i_u}",
+                              help="Basculer actif/inactif"):
+                    df_u.loc[i_u, 'actif'] = 'non' if actif else 'oui'
+                    replace_sheet('users', df_u)
+                    st.rerun()
+                if cc4.button("🗑️", key=f"del_u_{i_u}", help="Supprimer"):
+                    df_u_cleaned = df_u.drop(index=i_u).reset_index(drop=True)
+                    replace_sheet('users', df_u_cleaned)
+                    st.rerun()
+
     st.divider()
     df_c = read_sheet('creances')
     df_d = read_sheet('dossiers')
@@ -1550,19 +1648,31 @@ def page_notes():
             st.success("✅ Résumé enregistré.")
             st.rerun()
 
-    st.subheader("➕ Ajouter une note")
+    st.subheader("➕ Ajouter une note / tâche")
+    active_users = get_active_users()
+    user_options = ["— Personne —"] + [f"{u['nom']} ({u['email']})"
+                                         for u in active_users]
+    cur = current_user()
+    default_auteur = (cur['nom'] if cur else
+                      st.session_state.get('last_auteur', ''))
+
     with st.form("new_note", clear_on_submit=True):
         c1, c2 = st.columns(2)
-        auteur = c1.text_input("Auteur", value=st.session_state.get('last_auteur', ''))
+        auteur = c1.text_input("Auteur", value=default_auteur)
         action = c2.text_input("Type d'action",
                                placeholder="ex: Appel, Mail, Relance 1...")
         note = st.text_area("Note détaillée", height=100)
-        c3, c4 = st.columns(2)
+        c3, c4, c5 = st.columns(3)
         echeance = c3.date_input("Échéance (optionnel)", value=None)
         statut = c4.selectbox("Statut", ['Ouvert', 'En cours', 'Résolu'])
+        assigne_idx = c5.selectbox("Assigner à",
+                                     range(len(user_options)),
+                                     format_func=lambda i: user_options[i])
         if st.form_submit_button("Enregistrer", type="primary"):
             if note.strip():
                 st.session_state['last_auteur'] = auteur
+                assigne_email = active_users[assigne_idx - 1]['email'] \
+                    if assigne_idx > 0 else ''
                 new_id = next_id(notes_df)
                 append_row('notes', {
                     'id': new_id,
@@ -1574,6 +1684,7 @@ def page_notes():
                     'action': action,
                     'echeance': echeance.isoformat() if echeance else '',
                     'statut': statut,
+                    'assigne_a': assigne_email,
                 })
                 st.success("Note enregistrée.")
                 st.rerun()
@@ -1967,9 +2078,94 @@ def page_export():
 
 
 # ============================================================
+# PAGE ACCUEIL
+# ============================================================
+def page_accueil():
+    user = current_user()
+    if user is None:
+        st.header("🏠 Bienvenue")
+        st.info("Sélectionnez un utilisateur dans la barre latérale "
+                "pour voir votre espace personnel.")
+        st.markdown("**Aucun utilisateur actif** ? Ajoutez-en un dans "
+                    "Import → onglet **Utilisateurs**.")
+        return
+
+    st.header(f"🏠 Bonjour {user['nom']}")
+    st.caption(f"Connecté en tant que `{user['email']}`")
+
+    # Récupère les notes de l'utilisateur (assignées ou créées par lui)
+    notes = read_sheet('notes')
+    if notes.empty:
+        st.info("Aucune note enregistrée pour l'instant.")
+        return
+
+    if 'assigne_a' not in notes.columns:
+        notes['assigne_a'] = ''
+    notes['echeance'] = notes['echeance'].fillna('').astype(str)
+    notes['statut'] = notes['statut'].fillna('Ouvert').astype(str)
+
+    mes_notes = notes[
+        (notes['assigne_a'] == user['email']) |
+        (notes['auteur'].astype(str).str.lower() == user['email'].lower()) |
+        (notes['auteur'] == user['nom'])
+    ].copy()
+    mes_notes = mes_notes[mes_notes['statut'] != 'Résolu']
+
+    if mes_notes.empty:
+        st.success("✅ Aucune tâche en attente. Bonne journée !")
+        return
+
+    # Calcul de l'urgence par date d'échéance
+    today = pd.Timestamp(datetime.now().date())
+    mes_notes['_ech'] = pd.to_datetime(mes_notes['echeance'],
+                                        errors='coerce', dayfirst=True)
+    mes_notes['_jours_avant'] = (mes_notes['_ech'] - today).dt.days
+
+    en_retard = mes_notes[mes_notes['_jours_avant'] < 0]
+    urgent = mes_notes[(mes_notes['_jours_avant'] >= 0)
+                        & (mes_notes['_jours_avant'] <= 7)]
+    a_venir = mes_notes[mes_notes['_jours_avant'] > 7]
+    sans_echeance = mes_notes[mes_notes['_ech'].isna()]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🔴 En retard", len(en_retard))
+    c2.metric("🟠 Sous 7 jours", len(urgent))
+    c3.metric("🟢 À venir", len(a_venir))
+    c4.metric("⚪ Sans échéance", len(sans_echeance))
+
+    def _show_section(title, df, color):
+        if df.empty:
+            return
+        st.subheader(title)
+        for _, n in df.sort_values('_ech').iterrows():
+            with st.container(border=True):
+                cc1, cc2, cc3 = st.columns([3, 2, 2])
+                cc1.markdown(f"**Client** : `{n.get('comp_aux_num', '')}`")
+                cc1.markdown(f"*{n.get('action', '') or '(note)'}*")
+                cc1.write(n.get('note', ''))
+                cc2.markdown(f"**Échéance** : {n.get('echeance', '') or '—'}")
+                if pd.notna(n['_ech']):
+                    j = int(n['_jours_avant'])
+                    if j < 0:
+                        cc2.markdown(f":red[En retard de {abs(j)} jour(s)]")
+                    elif j == 0:
+                        cc2.markdown(":orange[Échéance aujourd'hui]")
+                    else:
+                        cc2.markdown(f"Dans {j} jour(s)")
+                cc3.markdown(f"**Statut** : {n.get('statut', '')}")
+                cc3.caption(f"Créée le {n.get('date_note', '')}")
+
+    _show_section("🔴 En retard", en_retard, "red")
+    _show_section("🟠 À traiter sous 7 jours", urgent, "orange")
+    _show_section("🟢 À venir", a_venir, "green")
+    _show_section("⚪ Sans échéance", sans_echeance, "gray")
+
+
+# ============================================================
 # NAVIGATION
 # ============================================================
 PAGES = {
+    "🏠 Accueil": page_accueil,
     "📥 Import": page_import,
     "📊 Créances": page_creances,
     "📝 Notes & Relances": page_notes,
@@ -1995,6 +2191,31 @@ if not ok:
 with st.sidebar:
     st.title("💼 Suivi Créances")
     st.caption("DCA — Suivi clients")
+
+    # --- Identification utilisateur ---
+    _cur_user = current_user()
+    if _cur_user is None:
+        # Pas de Streamlit auth : fallback sélection manuelle
+        active_users = get_active_users()
+        if active_users:
+            opts = ["— Choisir —"] + [f"{u['nom']} ({u['email']})"
+                                       for u in active_users]
+            sel = st.selectbox("👤 Connecté en tant que", opts,
+                                label_visibility="visible")
+            if sel != "— Choisir —":
+                idx = opts.index(sel) - 1
+                st.session_state['manual_user'] = active_users[idx]
+                st.rerun()
+        else:
+            st.caption("ℹ️ Ajoutez des utilisateurs dans Import → Utilisateurs")
+    else:
+        st.markdown(f"👤 **{_cur_user['nom']}**")
+        st.caption(_cur_user['email'])
+        if 'manual_user' in st.session_state:
+            if st.button("Se déconnecter", use_container_width=True):
+                del st.session_state['manual_user']
+                st.rerun()
+
     st.divider()
     page = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
     st.divider()
