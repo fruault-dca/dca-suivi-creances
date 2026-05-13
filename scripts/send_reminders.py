@@ -159,10 +159,14 @@ def main():
         print("Aucun utilisateur enregistré.")
         return
 
-    # Normalise
-    notes["statut"] = notes.get("statut", "Ouvert").fillna("Ouvert").astype(str)
-    notes["assigne_a"] = notes.get("assigne_a", "").fillna("").astype(str)
-    notes["echeance"] = notes.get("echeance", "").fillna("").astype(str)
+    # Normalise (crée les colonnes manquantes le cas échéant)
+    for col, default in [("statut", "Ouvert"), ("assigne_a", ""),
+                          ("echeance", ""), ("auteur", ""),
+                          ("comp_aux_num", ""), ("action", ""),
+                          ("note", ""), ("date_note", "")]:
+        if col not in notes.columns:
+            notes[col] = default
+        notes[col] = notes[col].fillna(default).astype(str)
     notes = notes[notes["statut"] != "Résolu"]
 
     today = pd.Timestamp(datetime.now().date())
