@@ -2,8 +2,8 @@ name: Envoi des rappels quotidiens
 
 on:
   schedule:
-    # Tous les jours à 06:00 UTC = 08:00 Paris (heure d'hiver) / 08:00 = 06:00 UTC l'été aussi
-    - cron: "0 6 * * 1-5"  # Lundi à vendredi
+    # Lundi et jeudi à 06:00 UTC = 08:00 Paris
+    - cron: "0 6 * * 1,4"  # 1=lundi, 4=jeudi
   workflow_dispatch:
     # Permet le déclenchement manuel depuis l'onglet Actions de GitHub
     inputs:
