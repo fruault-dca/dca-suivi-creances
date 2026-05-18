@@ -198,13 +198,33 @@ def update_cell_by_id(name, row_id, column, new_value):
         clear_cache()
 
 
+def update_row_by_id(name, row_id, updates: dict):
+    """Met à jour plusieurs colonnes d'une ligne en une seule passe."""
+    ws = get_ws(name)
+    headers = HEADERS[name]
+    id_col_idx = headers.index('id') + 1
+    cell = _with_retry(ws.find, str(row_id), in_column=id_col_idx)
+    if not cell:
+        return
+    cells = []
+    for col, val in updates.items():
+        if col in headers:
+            c = ws.cell(cell.row, headers.index(col) + 1)
+            c.value = val
+            cells.append(c)
+    if cells:
+        _with_retry(ws.update_cells, cells)
+        clear_cache()
+
+
 def delete_row_by_id(name, row_id):
     ws = get_ws(name)
     headers = HEADERS[name]
     id_col_idx = headers.index('id') + 1
-    cell = ws.find(str(row_id), in_column=id_col_idx)
+    cell = _with_retry(ws.find, str(row_id), in_column=id_col_idx)
     if cell:
-        ws.delete_rows(cell.row)
+        _with_retry(ws.delete_rows, cell.row)
+        clear_cache()
         clear_cache()
 
 
@@ -1570,23 +1590,86 @@ def page_notes():
     if client_notes.empty:
         st.info("Aucune note pour ce client.")
     else:
+        active_users_h = get_active_users()
         for _, n in client_notes.iterrows():
             icon = {'Ouvert': '🔴', 'En cours': '🟡', 'Résolu': '🟢'}.get(n['statut'], '⚪')
+            nid = int(n['id'])
             with st.expander(f"{icon} {n['date_note']} — {n['auteur']} — {n['action'] or '(note)'}"):
-                st.write(n['note'])
-                if n['echeance']:
-                    st.caption(f"📅 Échéance : {n['echeance']}")
-                cols = st.columns([2, 1, 1])
-                statuts = ['Ouvert', 'En cours', 'Résolu']
-                cur_idx = statuts.index(n['statut']) if n['statut'] in statuts else 0
-                new_st = cols[0].selectbox("Statut", statuts, index=cur_idx,
-                                           key=f"st_{n['id']}")
-                if cols[1].button("Mettre à jour", key=f"up_{n['id']}"):
-                    update_cell_by_id('notes', int(n['id']), 'statut', new_st)
-                    st.rerun()
-                if cols[2].button("🗑 Supprimer", key=f"del_{n['id']}"):
-                    delete_row_by_id('notes', int(n['id']))
-                    st.rerun()
+                edit_key = f"edit_mode_{nid}"
+                if not st.session_state.get(edit_key, False):
+                    # --- Mode lecture ---
+                    st.write(n['note'])
+                    if n['echeance']:
+                        st.caption(f"📅 Échéance : {n['echeance']}")
+                    if n.get('assigne_a'):
+                        st.caption(f"👤 Assignée à : {n['assigne_a']}")
+                    cols = st.columns([2, 1, 1, 1])
+                    statuts = ['Ouvert', 'En cours', 'Résolu']
+                    cur_idx = statuts.index(n['statut']) if n['statut'] in statuts else 0
+                    new_st = cols[0].selectbox("Statut", statuts, index=cur_idx,
+                                               key=f"st_{nid}")
+                    if cols[1].button("Statut ✓", key=f"up_{nid}"):
+                        update_cell_by_id('notes', nid, 'statut', new_st)
+                        st.rerun()
+                    if cols[2].button("✏️ Modifier", key=f"edbtn_{nid}"):
+                        st.session_state[edit_key] = True
+                        st.rerun()
+                    if cols[3].button("🗑 Supprimer", key=f"del_{nid}"):
+                        delete_row_by_id('notes', nid)
+                        st.rerun()
+                else:
+                    # --- Mode édition ---
+                    with st.form(f"edit_note_{nid}"):
+                        e_action = st.text_input("Type d'action",
+                                                  value=n.get('action', '') or '')
+                        e_note = st.text_area("Note détaillée",
+                                               value=n.get('note', '') or '',
+                                               height=120)
+                        ec1, ec2, ec3 = st.columns(3)
+                        # Échéance
+                        cur_ech = None
+                        try:
+                            if n.get('echeance'):
+                                cur_ech = pd.to_datetime(
+                                    n['echeance'], dayfirst=True).date()
+                        except Exception:
+                            cur_ech = None
+                        e_ech = ec1.date_input("Échéance", value=cur_ech)
+                        statuts = ['Ouvert', 'En cours', 'Résolu']
+                        e_idx = statuts.index(n['statut']) \
+                            if n['statut'] in statuts else 0
+                        e_statut = ec2.selectbox("Statut", statuts, index=e_idx)
+                        # Assignation
+                        u_opts = ["— Personne —"] + [
+                            f"{u['nom']} ({u['email']})" for u in active_users_h]
+                        cur_assigne = n.get('assigne_a', '') or ''
+                        a_idx = 0
+                        for i_u, u in enumerate(active_users_h):
+                            if u['email'] == cur_assigne:
+                                a_idx = i_u + 1
+                                break
+                        e_assigne_idx = ec3.selectbox(
+                            "Assigner à", range(len(u_opts)),
+                            format_func=lambda i: u_opts[i], index=a_idx)
+
+                        fc1, fc2 = st.columns(2)
+                        if fc1.form_submit_button("💾 Enregistrer",
+                                                   type="primary"):
+                            e_assigne = active_users_h[e_assigne_idx - 1]['email'] \
+                                if e_assigne_idx > 0 else ''
+                            update_row_by_id('notes', nid, {
+                                'action': e_action,
+                                'note': e_note,
+                                'echeance': e_ech.isoformat() if e_ech else '',
+                                'statut': e_statut,
+                                'assigne_a': e_assigne,
+                            })
+                            st.session_state[edit_key] = False
+                            st.success("Note modifiée.")
+                            st.rerun()
+                        if fc2.form_submit_button("Annuler"):
+                            st.session_state[edit_key] = False
+                            st.rerun()
 
     # --- Résumé direction (un par client, écrasable) ---
     st.subheader("📌 Résumé direction (1 ligne par client)")
