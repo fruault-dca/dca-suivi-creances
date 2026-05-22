@@ -206,8 +206,10 @@ def main():
         a_venir = mes_notes[mes_notes["_jours_avant"] > J_URGENT]
         sans_ech = mes_notes[mes_notes["_ech"].isna()]
 
-        if en_retard.empty and urgent.empty and not force:
-            print(f"[skip] {email} : aucune tâche urgente.")
+        # Envoi à tout utilisateur ayant au moins une tâche ouverte
+        # (retard, urgent, à venir, ou sans échéance)
+        if mes_notes.empty:
+            print(f"[skip] {email} : aucune tâche ouverte.")
             continue
 
         subject_parts = []
