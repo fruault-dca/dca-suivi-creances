@@ -2187,8 +2187,9 @@ def page_export():
 
             _autosize(ws)
 
-            # Masque les colonnes Consigné (I), Solde net (J), Jours retard (K)
-            for letter in ('I', 'J', 'K'):
+            # Masque les colonnes Consigné (I), Solde net (J), Jours retard (K),
+            # Prov. risque (L) et Prov. créances douteuses (M)
+            for letter in ('I', 'J', 'K', 'L', 'M'):
                 ws.column_dimensions[letter].hidden = True
 
             # Fige les 5 premières colonnes + la ligne d'en-tête
