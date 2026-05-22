@@ -70,7 +70,8 @@ HEADERS = {
                  'agence', 'commercial', 'conducteur', 'etat', 'stade', 'type_contrat',
                  'contrat_ht', 'contrat_ttc', 'contrat_rev_ht', 'contrat_rev_ttc',
                  'avenants_ht', 'avenants_ttc', 'date_signature', 'date_reception'],
-    'mapping': ['piece_ref', 'ref_client', 'comp_aux_num', 'date_facture'],
+    'mapping': ['piece_ref', 'ref_client', 'comp_aux_num',
+                'date_facture', 'situation'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
               'action', 'echeance', 'statut', 'assigne_a'],
     'users': ['email', 'nom_affichage', 'actif'],
@@ -441,8 +442,9 @@ def load_creances_enrichies(only_open=True):
 
         df_c['_pk'] = df_c['piece_ref'].apply(norm_piece)
         map_cols = ['piece_ref', 'ref_client']
-        if 'date_facture' in df_m.columns:
-            map_cols.append('date_facture')
+        for opt in ('date_facture', 'situation'):
+            if opt in df_m.columns:
+                map_cols.append(opt)
         df_m2 = df_m[map_cols].copy()
         df_m2['_pk'] = df_m2['piece_ref'].apply(norm_piece)
         # Priorité aux refs réelles sur "__HORS_CRM__" en cas de doublon de _pk
@@ -450,8 +452,9 @@ def load_creances_enrichies(only_open=True):
         df_m2 = df_m2.sort_values('_priority', ascending=False) \
             .drop_duplicates('_pk')
         keep_cols = ['_pk', 'ref_client']
-        if 'date_facture' in df_m2.columns:
-            keep_cols.append('date_facture')
+        for opt in ('date_facture', 'situation'):
+            if opt in df_m2.columns:
+                keep_cols.append(opt)
         df_m2 = df_m2[keep_cols]
         df_c = df_c.merge(df_m2, on='_pk', how='left').drop(columns=['_pk'])
     else:
@@ -741,6 +744,9 @@ def page_import():
                                 'code_comptable']
                 aliases_date = ['date', 'date_facture', 'datefacture',
                                 'date_fact', 'date_piece', 'date_emission']
+                aliases_situation = ['situation', 'etat', 'avancement',
+                                      'stade', 'situation_facture',
+                                      'etat_avancement']
 
                 def normalize(s):
                     import unicodedata, re
@@ -779,12 +785,15 @@ def page_import():
                     col_ref = next(c for c in aliases_ref if c in df_map.columns)
                     col_comp = next((c for c in aliases_comp if c in df_map.columns), None)
                     col_date = next((c for c in aliases_date if c in df_map.columns), None)
+                    col_situation = next(
+                        (c for c in aliases_situation if c in df_map.columns), None)
 
                     st.info(f"✅ En-tête détecté en ligne {detected_header + 1}. "
                             f"Colonnes utilisées : facture=`{col_piece}`, "
                             f"dossier=`{col_ref}`"
                             + (f", client=`{col_comp}`" if col_comp else "")
-                            + (f", date=`{col_date}`" if col_date else ""))
+                            + (f", date=`{col_date}`" if col_date else "")
+                            + (f", situation=`{col_situation}`" if col_situation else ""))
 
                     def _fmt_date(v):
                         """Parse une date (Timestamp, serial Excel, str DD/MM/YYYY) vers YYYY-MM-DD."""
@@ -859,6 +868,7 @@ def page_import():
                             'ref_client': resolved,
                             'comp_aux_num': to_str(r.get(col_comp, '')) if col_comp else '',
                             'date_facture': _fmt_date(r.get(col_date, '')) if col_date else '',
+                            'situation': to_str(r.get(col_situation, '')) if col_situation else '',
                         })
 
                     new_df = pd.DataFrame(rows)
@@ -2087,16 +2097,39 @@ def page_export():
             df_dir = df_all.copy()
 
             ws = wb.create_sheet("Synthèse Direction")
+            # Ordre : 1=Client 2=Commercial 3=Conducteur 4=État 5=Avancement
+            #        6=Date livraison 7=Date facture 8=Solde dû
+            #        9=Consigné [hidden] 10=Solde net [hidden] 11=Jours retard [hidden]
+            #        12=Prov risque 13=Prov créances douteuses
+            #        14=Résumé 15=Action 16=Responsable
+            #        17=Date MAJ 18=Auteur résumé 19=Statut
             headers = ['Client', 'Commercial', 'Conducteur', 'État',
-                       'Date livraison',
+                       'Avancement facture', 'Date livraison', 'Date facture',
                        'Solde dû (€)', 'Consigné huissier (€)', 'Solde net (€)',
-                       'Jours retard max', 'Statut',
+                       'Jours retard max',
                        'Prov. risque (€)', 'Prov. créances douteuses (€)',
                        'Résumé', 'Action à mener', 'Responsable action',
-                       'Date MAJ', 'Auteur résumé']
+                       'Date MAJ', 'Auteur résumé', 'Statut']
             ws.append(headers)
             for c in ws[1]:
                 _style_header(c)
+
+            # Prépare les colonnes optionnelles
+            df_dir = df_dir.copy()
+            if 'situation' not in df_dir.columns:
+                df_dir['situation'] = ''
+            if 'date_facture' not in df_dir.columns:
+                df_dir['date_facture'] = ''
+            df_dir['date_facture'] = df_dir['date_facture'].fillna('').astype(str)
+            df_dir['_dt_fact'] = pd.to_datetime(df_dir['date_facture'],
+                                                 errors='coerce', dayfirst=True)
+
+            # Garde la situation et date_facture de la facture la plus récente
+            df_dir_sorted = df_dir.sort_values('_dt_fact', ascending=False)
+            last_fact = df_dir_sorted.drop_duplicates('comp_aux_num')[
+                ['comp_aux_num', 'situation', 'date_facture']
+            ].rename(columns={'situation': '_situation_last',
+                               'date_facture': '_date_fact_last'})
 
             synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib',
                                        'commercial', 'conducteur',
@@ -2111,6 +2144,7 @@ def page_export():
                 date_livraison=('date_reception', 'first'),
             ).reset_index().sort_values('solde', ascending=False)
 
+            synth_d = synth_d.merge(last_fact, on='comp_aux_num', how='left')
             synth_d = synth_d.merge(last_resume, on='comp_aux_num', how='left')
 
             for _, r in synth_d.iterrows():
@@ -2121,12 +2155,13 @@ def page_export():
                 ws.append([
                     r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['etat'],
+                    r.get('_situation_last', '') or '',
                     r.get('date_livraison', '') or '',
+                    r.get('_date_fact_last', '') or '',
                     round(solde_brut, 2),
                     round(consigne, 2),
                     round(solde_net, 2),
                     int(r['jours']) if pd.notna(r['jours']) else '',
-                    statut,
                     round(r['provision_risque'] or 0, 2),
                     round(r['provision_creances_douteuses'] or 0, 2),
                     r.get('note_resume', '') or '',
@@ -2134,12 +2169,14 @@ def page_export():
                     r.get('responsable_action', '') or '',
                     r.get('date_note', '') or '',
                     r.get('auteur', '') or '',
+                    statut,
                 ])
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            # F=Solde, G=Consigné, H=Solde net, K=Prov risque, L=Prov créances douteuses
-            for col_idx in (6, 7, 8, 11, 12):
+            # Colonnes monétaires : H=Solde, I=Consigné, J=Solde net,
+            #                       L=Prov risque, M=Prov créances douteuses
+            for col_idx in (8, 9, 10, 12, 13):
                 ws.cell(total_row, col_idx,
                         f'=SUM({get_column_letter(col_idx)}2:'
                         f'{get_column_letter(col_idx)}{total_row - 1})').font = Font(bold=True)
@@ -2147,8 +2184,15 @@ def page_export():
                                          min_col=col_idx, max_col=col_idx):
                     for c in row:
                         c.number_format = '#,##0.00 €'
+
             _autosize(ws)
-            ws.freeze_panes = 'A2'
+
+            # Masque les colonnes Consigné (I), Solde net (J), Jours retard (K)
+            for letter in ('I', 'J', 'K'):
+                ws.column_dimensions[letter].hidden = True
+
+            # Fige les 5 premières colonnes + la ligne d'en-tête
+            ws.freeze_panes = 'F2'
 
             buf = io.BytesIO()
             wb.save(buf)
