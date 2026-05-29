@@ -313,6 +313,32 @@ def to_str(val):
     return str(val).strip()
 
 
+def fr_date(s):
+    """Convertit une date ISO YYYY-MM-DD (ou autre) en JJ/MM/AAAA pour affichage."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ''
+    s = str(s).strip()
+    if not s or s.lower() == 'nan':
+        return ''
+    # Déjà au format français → on garde
+    if len(s) >= 10 and s[2] == '/' and s[5] == '/':
+        return s[:10]
+    try:
+        dt = pd.to_datetime(s, errors='coerce', dayfirst=False)
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors='coerce', dayfirst=True)
+        if pd.isna(dt):
+            return s
+        return dt.strftime('%d/%m/%Y')
+    except Exception:
+        return s
+
+
+def fr_series(s):
+    """Convertit une Series de dates en strings JJ/MM/AAAA."""
+    return s.fillna('').astype(str).apply(fr_date)
+
+
 def format_date_fec(d):
     s = to_str(d).strip()
     if not s:
@@ -1420,6 +1446,7 @@ def page_creances():
                   f"{f_en_cours['solde'].sum():,.0f} €".replace(",", " "))
         kb.metric("Nb dossiers", len(synth_ec))
 
+        synth_ec['derniere_facture'] = fr_series(synth_ec['derniere_facture'])
         synth_ec_display = synth_ec.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
@@ -1458,6 +1485,8 @@ def page_creances():
         kc.metric("Total consigné", f"{total_cons:,.0f} €".replace(",", " "))
         kd.metric("Solde net", f"{total_net:,.0f} €".replace(",", " "))
 
+        synth_lv['derniere_facture'] = fr_series(synth_lv['derniere_facture'])
+        synth_lv['date_livraison'] = fr_series(synth_lv['date_livraison'])
         synth_lv_display = synth_lv.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
@@ -1503,6 +1532,8 @@ def page_creances():
         ke.metric("Prov. créances douteuses",
                   f"{total_pcd:,.0f} €".replace(",", " "))
 
+        synth_ct['derniere_facture'] = fr_series(synth_ct['derniere_facture'])
+        synth_ct['date_livraison'] = fr_series(synth_ct['date_livraison'])
         synth_ct_display = synth_ct.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
@@ -1523,10 +1554,11 @@ def page_creances():
         st.dataframe(styled_ct, use_container_width=True, hide_index=True)
 
     with st.expander("Détail ligne par ligne"):
+        detail = f[['comp_aux_lib', 'piece_ref', 'ecriture_date', 'journal_code',
+                    'ecriture_lib', 'debit', 'credit', 'solde', 'commercial', 'etat']].copy()
+        detail['ecriture_date'] = fr_series(detail['ecriture_date'])
         st.dataframe(
-            f[['comp_aux_lib', 'piece_ref', 'ecriture_date', 'journal_code',
-               'ecriture_lib', 'debit', 'credit', 'solde', 'commercial', 'etat']]
-            .rename(columns={
+            detail.rename(columns={
                 'comp_aux_lib': 'Client', 'piece_ref': 'Réf. pièce',
                 'ecriture_date': 'Date', 'journal_code': 'Journal',
                 'ecriture_lib': 'Libellé', 'debit': 'Débit',
@@ -1894,7 +1926,7 @@ def page_export():
                     jours = int(r.get('jours_retard', 0) or 0)
                     ws.append([
                         r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
-                        r.get('date_facture_eff', '') or r['ecriture_date'],
+                        fr_date(r.get('date_facture_eff', '') or r['ecriture_date']),
                         r['ecriture_lib'],
                         round(r['solde'], 2),
                         jours, r['etat']
@@ -1921,7 +1953,8 @@ def page_export():
                     _style_header(c)
                 for _, r in non_map.iterrows():
                     ws.append([r['comp_aux_lib'], r['comp_aux_num'], r['piece_ref'],
-                               r['ecriture_date'], r['ecriture_lib'], round(r['solde'], 2)])
+                               fr_date(r['ecriture_date']),
+                               r['ecriture_lib'], round(r['solde'], 2)])
                 _autosize(ws)
 
             if not notes.empty:
@@ -1930,8 +1963,9 @@ def page_export():
                 for c in ws[1]:
                     _style_header(c)
                 for _, r in notes.iterrows():
-                    ws.append([r['date_note'], r['comp_aux_num'], r['auteur'],
-                               r['action'], r['note'], r['echeance'], r['statut']])
+                    ws.append([fr_date(r['date_note']), r['comp_aux_num'], r['auteur'],
+                               r['action'], r['note'],
+                               fr_date(r['echeance']), r['statut']])
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
@@ -1948,7 +1982,9 @@ def page_export():
         st.markdown("Dataset plat pour Power BI avec tranches d'âge et dernière relance.")
         if st.button("🔧 Générer l'export Power BI", type="primary"):
             pbi = df.copy()
-            pbi['ecriture_date'] = pd.to_datetime(pbi['ecriture_date'], errors='coerce')
+            pbi['ecriture_date'] = pd.to_datetime(pbi['ecriture_date'],
+                                                    errors='coerce',
+                                                    dayfirst=True)
             pbi['annee'] = pbi['ecriture_date'].dt.year
             pbi['mois'] = pbi['ecriture_date'].dt.to_period('M').astype(str)
             pbi['age_jours'] = (pd.Timestamp.now().normalize() - pbi['ecriture_date']).dt.days
@@ -2013,7 +2049,7 @@ def page_export():
                                r['commercial'],
                                round(r['solde'], 2), r['nb'],
                                int(r['jours']) if pd.notna(r['jours']) else '',
-                               r['derniere']])
+                               fr_date(r['derniere'])])
 
                 total_row = ws.max_row + 1
                 ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
@@ -2041,7 +2077,7 @@ def page_export():
                         _style_header(c)
                     for _, r in df_r.iterrows():
                         ws.append([r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
-                                   r['ecriture_date'], r['journal_code'],
+                                   fr_date(r['ecriture_date']), r['journal_code'],
                                    r['ecriture_lib'],
                                    round(r['debit'], 2), round(r['credit'], 2),
                                    round(r['solde'], 2),
@@ -2177,8 +2213,8 @@ def page_export():
                     r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['etat'],
                     r.get('_situation_last', '') or '',
-                    r.get('date_livraison', '') or '',
-                    r.get('_date_fact_last', '') or '',
+                    fr_date(r.get('date_livraison', '') or ''),
+                    fr_date(r.get('_date_fact_last', '') or ''),
                     round(solde_brut, 2),
                     round(consigne, 2),
                     round(solde_net, 2),
@@ -2188,7 +2224,7 @@ def page_export():
                     r.get('note_resume', '') or '',
                     r.get('action_resume', '') or '',
                     r.get('responsable_action', '') or '',
-                    r.get('date_note', '') or '',
+                    fr_date(r.get('date_note', '') or ''),
                     r.get('auteur', '') or '',
                     statut,
                 ])
