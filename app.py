@@ -339,6 +339,24 @@ def fr_series(s):
     return s.fillna('').astype(str).apply(fr_date)
 
 
+def to_date_obj(s):
+    """Convertit une string en objet date Python (pour Excel reconnaissable)."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return None
+    s = str(s).strip()
+    if not s or s.lower() == 'nan':
+        return None
+    try:
+        dt = pd.to_datetime(s, errors='coerce', dayfirst=False)
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors='coerce', dayfirst=True)
+        if pd.isna(dt):
+            return None
+        return dt.date()
+    except Exception:
+        return None
+
+
 def format_date_fec(d):
     s = to_str(d).strip()
     if not s:
@@ -1926,7 +1944,7 @@ def page_export():
                     jours = int(r.get('jours_retard', 0) or 0)
                     ws.append([
                         r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
-                        fr_date(r.get('date_facture_eff', '') or r['ecriture_date']),
+                        to_date_obj(r.get('date_facture_eff', '') or r['ecriture_date']),
                         r['ecriture_lib'],
                         round(r['solde'], 2),
                         jours, r['etat']
@@ -1941,6 +1959,11 @@ def page_export():
                 for row in ws.iter_rows(min_row=2, max_row=last, min_col=6, max_col=6):
                     for c in row:
                         c.number_format = '#,##0.00 €'
+                # Format date sur la colonne D (Date facture)
+                for row in ws.iter_rows(min_row=2, max_row=last - 1,
+                                         min_col=4, max_col=4):
+                    for c in row:
+                        c.number_format = 'DD/MM/YYYY'
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
@@ -1953,8 +1976,13 @@ def page_export():
                     _style_header(c)
                 for _, r in non_map.iterrows():
                     ws.append([r['comp_aux_lib'], r['comp_aux_num'], r['piece_ref'],
-                               fr_date(r['ecriture_date']),
+                               to_date_obj(r['ecriture_date']),
                                r['ecriture_lib'], round(r['solde'], 2)])
+                # Format date colonne D
+                for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
+                                         min_col=4, max_col=4):
+                    for c in row:
+                        c.number_format = 'DD/MM/YYYY'
                 _autosize(ws)
 
             if not notes.empty:
@@ -1963,9 +1991,15 @@ def page_export():
                 for c in ws[1]:
                     _style_header(c)
                 for _, r in notes.iterrows():
-                    ws.append([fr_date(r['date_note']), r['comp_aux_num'], r['auteur'],
+                    ws.append([to_date_obj(r['date_note']), r['comp_aux_num'], r['auteur'],
                                r['action'], r['note'],
-                               fr_date(r['echeance']), r['statut']])
+                               to_date_obj(r['echeance']), r['statut']])
+                # Format dates colonnes A (Date) et F (Échéance)
+                for col_idx in (1, 6):
+                    for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
+                                             min_col=col_idx, max_col=col_idx):
+                        for c in row:
+                            c.number_format = 'DD/MM/YYYY'
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
@@ -2049,7 +2083,7 @@ def page_export():
                                r['commercial'],
                                round(r['solde'], 2), r['nb'],
                                int(r['jours']) if pd.notna(r['jours']) else '',
-                               fr_date(r['derniere'])])
+                               to_date_obj(r['derniere'])])
 
                 total_row = ws.max_row + 1
                 ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
@@ -2058,6 +2092,11 @@ def page_export():
                                          min_col=5, max_col=5):
                     for c in row:
                         c.number_format = '#,##0.00 €'
+                # Format date colonne H (Dernière écriture)
+                for row in ws.iter_rows(min_row=2, max_row=total_row - 1,
+                                         min_col=8, max_col=8):
+                    for c in row:
+                        c.number_format = 'DD/MM/YYYY'
                 _autosize(ws)
                 ws.freeze_panes = 'A2'
 
@@ -2077,7 +2116,7 @@ def page_export():
                         _style_header(c)
                     for _, r in df_r.iterrows():
                         ws.append([r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
-                                   fr_date(r['ecriture_date']), r['journal_code'],
+                                   to_date_obj(r['ecriture_date']), r['journal_code'],
                                    r['ecriture_lib'],
                                    round(r['debit'], 2), round(r['credit'], 2),
                                    round(r['solde'], 2),
@@ -2090,6 +2129,11 @@ def page_export():
                                              min_col=7, max_col=9):
                         for c in row:
                             c.number_format = '#,##0.00 €'
+                    # Format date colonne D
+                    for row in ws.iter_rows(min_row=2, max_row=last - 1,
+                                             min_col=4, max_col=4):
+                        for c in row:
+                            c.number_format = 'DD/MM/YYYY'
                     _autosize(ws)
                     ws.freeze_panes = 'A2'
 
@@ -2213,8 +2257,8 @@ def page_export():
                     r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['etat'],
                     r.get('_situation_last', '') or '',
-                    fr_date(r.get('date_livraison', '') or ''),
-                    fr_date(r.get('_date_fact_last', '') or ''),
+                    to_date_obj(r.get('date_livraison', '') or ''),
+                    to_date_obj(r.get('_date_fact_last', '') or ''),
                     round(solde_brut, 2),
                     round(consigne, 2),
                     round(solde_net, 2),
@@ -2224,7 +2268,7 @@ def page_export():
                     r.get('note_resume', '') or '',
                     r.get('action_resume', '') or '',
                     r.get('responsable_action', '') or '',
-                    fr_date(r.get('date_note', '') or ''),
+                    to_date_obj(r.get('date_note', '') or ''),
                     r.get('auteur', '') or '',
                     statut,
                 ])
@@ -2241,6 +2285,13 @@ def page_export():
                                          min_col=col_idx, max_col=col_idx):
                     for c in row:
                         c.number_format = '#,##0.00 €'
+
+            # Format dates : F=Date livraison, G=Date facture, Q=Date MAJ
+            for col_idx in (6, 7, 17):
+                for row in ws.iter_rows(min_row=2, max_row=total_row - 1,
+                                         min_col=col_idx, max_col=col_idx):
+                    for c in row:
+                        c.number_format = 'DD/MM/YYYY'
 
             _autosize(ws)
 
