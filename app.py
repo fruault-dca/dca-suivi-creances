@@ -2096,6 +2096,24 @@ def page_export():
             # Synthèse globale (créances ouvertes y compris contentieux)
             df_dir = df_all.copy()
 
+            # Exclusion des entités internes / intercos du rapport Direction
+            EXCLUSIONS_DIRECTION = [
+                'SCCV LHDL',
+                'SCCV SAINT PAIR SANTE',
+                'DPA DUD',
+                'DESIGN PROMOTIONS',
+                'SNC LA COUR AUX CHEVALIERS',
+            ]
+            if not df_dir.empty and 'comp_aux_lib' in df_dir.columns:
+                lib_upper = df_dir['comp_aux_lib'].fillna('').astype(str).str.upper()
+                mask_excl = pd.Series(False, index=df_dir.index)
+                for excl in EXCLUSIONS_DIRECTION:
+                    mask_excl |= lib_upper.str.contains(excl.upper(), na=False)
+                df_dir = df_dir[~mask_excl]
+                if mask_excl.any():
+                    st.caption(f"ℹ️ {mask_excl.sum()} ligne(s) exclue(s) "
+                               f"(entités internes : {', '.join(EXCLUSIONS_DIRECTION)})")
+
             ws = wb.create_sheet("Synthèse Direction")
             # Ordre : 1=Client 2=Commercial 3=Conducteur 4=État 5=Avancement
             #        6=Date livraison 7=Date facture 8=Solde dû
@@ -2142,7 +2160,10 @@ def page_export():
                                                 'first'),
                 montant_consigne=('montant_consigne', 'first'),
                 date_livraison=('date_reception', 'first'),
-            ).reset_index().sort_values('solde', ascending=False)
+                date_plus_ancienne=('_dt_fact', 'min'),
+            ).reset_index().sort_values('date_plus_ancienne',
+                                          ascending=True,
+                                          na_position='last')
 
             synth_d = synth_d.merge(last_fact, on='comp_aux_num', how='left')
             synth_d = synth_d.merge(last_resume, on='comp_aux_num', how='left')
