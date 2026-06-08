@@ -2591,6 +2591,16 @@ with st.sidebar:
         st.metric("Clients en créance", _df_side['comp_aux_num'].nunique())
         st.metric("Total dû", f"{_df_side['solde'].sum():,.0f} €".replace(",", " "))
 
+    # Date du dernier import FEC
+    _df_raw = read_sheet('creances')
+    if not _df_raw.empty and 'import_date' in _df_raw.columns:
+        _import_dates = pd.to_datetime(_df_raw['import_date'],
+                                        errors='coerce')
+        _last_import = _import_dates.max()
+        if pd.notna(_last_import):
+            st.caption(f"📅 Dernier import FEC : "
+                       f"{_last_import.strftime('%d/%m/%Y à %H:%M')}")
+
     if st.button("🔄 Rafraîchir les données"):
         clear_cache()
         st.rerun()
