@@ -297,13 +297,18 @@ def show_login():
                 "l'onglet Import → Utilisateurs.")
         st.stop()
 
-    df_users['email'] = df_users['email'].fillna('').astype(str).str.lower()
-    df_users['actif'] = df_users.get('actif', 'oui').fillna('oui') \
-        .astype(str).str.lower()
+    # Crée les colonnes manquantes pour éviter les erreurs
+    for col, default in [('email', ''), ('nom_affichage', ''),
+                          ('actif', 'oui'), ('password_hash', ''),
+                          ('role', 'user')]:
+        if col not in df_users.columns:
+            df_users[col] = default
+        df_users[col] = df_users[col].fillna(default).astype(str)
+
+    df_users['email'] = df_users['email'].str.lower()
+    df_users['actif'] = df_users['actif'].str.lower()
     df_users = df_users[df_users['actif'].isin(
         ('oui', 'true', '1', 'yes', ''))]
-    df_users['password_hash'] = df_users.get('password_hash', '') \
-        .fillna('').astype(str)
 
     with st.form("login_form"):
         email = st.text_input("Email").strip().lower()
