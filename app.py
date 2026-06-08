@@ -74,7 +74,7 @@ HEADERS = {
                 'date_facture', 'situation'],
     'notes': ['id', 'ref_client', 'comp_aux_num', 'date_note', 'auteur', 'note',
               'action', 'echeance', 'statut', 'assigne_a'],
-    'users': ['email', 'nom_affichage', 'actif'],
+    'users': ['email', 'nom_affichage', 'actif', 'password_hash', 'role'],
     'contentieux': ['ref_client', 'comp_aux_num', 'responsable',
                     'date_passage', 'commentaire',
                     'provision_risque', 'provision_creances_douteuses'],
@@ -241,28 +241,137 @@ def next_id(df):
 # ============================================================
 # VÉRIFICATION DE LA CONFIG
 # ============================================================
-def current_user():
-    """Retourne l'utilisateur courant sous forme {email, nom}.
+def hash_pwd(plain: str) -> str:
+    """Hash sécurisé d'un mot de passe (PBKDF2-SHA256 + salt aléatoire)."""
+    import hashlib, secrets as _secrets
+    salt = _secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac('sha256', plain.encode('utf-8'),
+                             salt.encode('utf-8'), 100_000)
+    return f"pbkdf2$100000${salt}${h.hex()}"
 
-    Priorité :
-    1. Streamlit viewer authentication (st.experimental_user.email)
-    2. Sélection manuelle stockée en session_state (fallback dev/local)
-    """
-    # Tentative Streamlit auth
+
+def check_pwd(plain: str, stored: str) -> bool:
+    """Vérifie un mot de passe contre son hash stocké."""
+    import hashlib
+    if not stored or '$' not in stored:
+        return False
     try:
-        u = st.experimental_user
-        email = getattr(u, 'email', None)
-        if email:
-            df_users = read_sheet('users')
-            nom = email
-            if not df_users.empty:
-                match = df_users[df_users['email'] == email]
-                if not match.empty:
-                    nom = match.iloc[0].get('nom_affichage', email) or email
-            return {'email': email, 'nom': nom}
+        algo, iters, salt, hexhash = stored.split('$')
+        if algo != 'pbkdf2':
+            return False
+        h = hashlib.pbkdf2_hmac('sha256', plain.encode('utf-8'),
+                                 salt.encode('utf-8'), int(iters))
+        return h.hex() == hexhash
     except Exception:
-        pass
-    # Fallback : sélection manuelle
+        return False
+
+
+def login_user(email: str, nom: str):
+    st.session_state['auth_email'] = email
+    st.session_state['auth_nom'] = nom
+
+
+def logout_user():
+    for k in ('auth_email', 'auth_nom', 'manual_user'):
+        if k in st.session_state:
+            del st.session_state[k]
+
+
+def is_logged_in() -> bool:
+    return 'auth_email' in st.session_state
+
+
+def show_login():
+    """Écran de connexion par mot de passe."""
+    st.markdown(
+        "<style>.block-container { max-width: 480px; padding-top: 4rem; }</style>",
+        unsafe_allow_html=True,
+    )
+    st.title("💼 Suivi Créances DCA")
+    st.caption("Connectez-vous pour accéder à l'application")
+
+    df_users = read_sheet('users')
+    if df_users.empty:
+        st.error("Aucun utilisateur n'est encore enregistré dans le système.")
+        st.info("L'administrateur doit d'abord créer des utilisateurs dans "
+                "l'onglet Import → Utilisateurs.")
+        st.stop()
+
+    df_users['email'] = df_users['email'].fillna('').astype(str).str.lower()
+    df_users['actif'] = df_users.get('actif', 'oui').fillna('oui') \
+        .astype(str).str.lower()
+    df_users = df_users[df_users['actif'].isin(
+        ('oui', 'true', '1', 'yes', ''))]
+    df_users['password_hash'] = df_users.get('password_hash', '') \
+        .fillna('').astype(str)
+
+    with st.form("login_form"):
+        email = st.text_input("Email").strip().lower()
+        password = st.text_input("Mot de passe", type="password")
+        col_a, col_b = st.columns(2)
+        submitted = col_a.form_submit_button("Se connecter", type="primary",
+                                              use_container_width=True)
+        signup_mode = col_b.form_submit_button(
+            "1ère connexion (définir mot de passe)",
+            use_container_width=True)
+
+    if not (submitted or signup_mode):
+        st.stop()
+
+    if not email or '@' not in email:
+        st.error("Email invalide.")
+        st.stop()
+
+    user_row = df_users[df_users['email'] == email]
+    if user_row.empty:
+        st.error("Aucun compte actif ne correspond à cet email. "
+                 "Contactez l'administrateur.")
+        st.stop()
+
+    user = user_row.iloc[0]
+    nom = user.get('nom_affichage', email) or email
+    stored_hash = str(user.get('password_hash', '') or '')
+
+    if signup_mode:
+        # 1ère connexion : autorisé seulement si pas encore de mdp défini
+        if stored_hash:
+            st.error("Un mot de passe est déjà défini pour ce compte. "
+                     "Utilisez 'Se connecter' (ou demandez une réinitialisation).")
+            st.stop()
+        if len(password) < 6:
+            st.error("Le mot de passe doit faire au moins 6 caractères.")
+            st.stop()
+        new_hash = hash_pwd(password)
+        # Met à jour la ligne dans le sheet
+        df_full = read_sheet('users')
+        df_full.loc[df_full['email'].astype(str).str.lower() == email,
+                    'password_hash'] = new_hash
+        replace_sheet('users', df_full)
+        login_user(email, nom)
+        st.success(f"✅ Mot de passe défini. Bienvenue {nom}.")
+        st.rerun()
+
+    # Connexion normale
+    if not stored_hash:
+        st.warning("Ce compte n'a pas encore de mot de passe défini. "
+                   "Cliquez sur '1ère connexion' pour en créer un.")
+        st.stop()
+    if not check_pwd(password, stored_hash):
+        st.error("Mot de passe incorrect.")
+        st.stop()
+    login_user(email, nom)
+    st.rerun()
+
+
+def current_user():
+    """Retourne l'utilisateur courant {email, nom} si authentifié."""
+    if 'auth_email' in st.session_state:
+        return {
+            'email': st.session_state['auth_email'],
+            'nom': st.session_state.get('auth_nom',
+                                          st.session_state['auth_email']),
+        }
+    # Fallback dev/local
     if 'manual_user' in st.session_state:
         return st.session_state['manual_user']
     return None
@@ -1348,21 +1457,47 @@ def page_import():
             st.info("Aucun utilisateur. Ajoutez-en un avec le formulaire ci-dessus.")
         else:
             for i_u, r in df_u.iterrows():
-                cc1, cc2, cc3, cc4 = st.columns([3, 3, 1, 1])
+                cc1, cc2, cc3, cc4, cc5 = st.columns([3, 2, 1, 1, 1])
                 cc1.write(f"**{r.get('nom_affichage', '')}**")
                 cc1.caption(r.get('email', ''))
                 actif = str(r.get('actif', 'oui')).lower() in (
                     'oui', 'true', '1', 'yes', '')
-                cc2.write("🟢 Actif" if actif else "🔴 Inactif")
+                has_pwd = bool(str(r.get('password_hash', '') or '').strip())
+                cc2.write(("🟢 Actif" if actif else "🔴 Inactif")
+                          + (" · 🔑" if has_pwd else " · ⚠️ sans mdp"))
                 if cc3.button("🔄", key=f"toggle_u_{i_u}",
                               help="Basculer actif/inactif"):
                     df_u.loc[i_u, 'actif'] = 'non' if actif else 'oui'
                     replace_sheet('users', df_u)
                     st.rerun()
-                if cc4.button("🗑️", key=f"del_u_{i_u}", help="Supprimer"):
+                if cc4.button("🔐", key=f"reset_u_{i_u}",
+                              help="Réinitialiser le mot de passe"):
+                    st.session_state[f'reset_pwd_for_{i_u}'] = True
+                if cc5.button("🗑️", key=f"del_u_{i_u}", help="Supprimer"):
                     df_u_cleaned = df_u.drop(index=i_u).reset_index(drop=True)
                     replace_sheet('users', df_u_cleaned)
                     st.rerun()
+
+                # Formulaire de réinitialisation inline
+                if st.session_state.get(f'reset_pwd_for_{i_u}'):
+                    with st.form(f"reset_form_{i_u}"):
+                        new_pwd = st.text_input(
+                            f"Nouveau mot de passe pour {r.get('email', '')}",
+                            type="password", key=f"reset_pwd_input_{i_u}")
+                        cra, crb = st.columns(2)
+                        if cra.form_submit_button("💾 Définir", type="primary"):
+                            if len(new_pwd) < 6:
+                                st.warning("Le mot de passe doit faire "
+                                           "au moins 6 caractères.")
+                            else:
+                                df_u.loc[i_u, 'password_hash'] = hash_pwd(new_pwd)
+                                replace_sheet('users', df_u)
+                                st.session_state[f'reset_pwd_for_{i_u}'] = False
+                                st.success("Mot de passe défini.")
+                                st.rerun()
+                        if crb.form_submit_button("Annuler"):
+                            st.session_state[f'reset_pwd_for_{i_u}'] = False
+                            st.rerun()
 
     st.divider()
     df_c = read_sheet('creances')
@@ -2410,6 +2545,9 @@ PAGES = {
 
 # Check config before any page
 ok, msg = check_config()
+if ok and not is_logged_in():
+    show_login()
+    st.stop()
 if not ok:
     st.error(f"❌ Configuration manquante : {msg}")
     st.info("""
@@ -2430,27 +2568,12 @@ with st.sidebar:
 
     # --- Identification utilisateur ---
     _cur_user = current_user()
-    if _cur_user is None:
-        # Pas de Streamlit auth : fallback sélection manuelle
-        active_users = get_active_users()
-        if active_users:
-            opts = ["— Choisir —"] + [f"{u['nom']} ({u['email']})"
-                                       for u in active_users]
-            sel = st.selectbox("👤 Connecté en tant que", opts,
-                                label_visibility="visible")
-            if sel != "— Choisir —":
-                idx = opts.index(sel) - 1
-                st.session_state['manual_user'] = active_users[idx]
-                st.rerun()
-        else:
-            st.caption("ℹ️ Ajoutez des utilisateurs dans Import → Utilisateurs")
-    else:
+    if _cur_user is not None:
         st.markdown(f"👤 **{_cur_user['nom']}**")
         st.caption(_cur_user['email'])
-        if 'manual_user' in st.session_state:
-            if st.button("Se déconnecter", use_container_width=True):
-                del st.session_state['manual_user']
-                st.rerun()
+        if st.button("🚪 Se déconnecter", use_container_width=True):
+            logout_user()
+            st.rerun()
 
     st.divider()
     page = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
