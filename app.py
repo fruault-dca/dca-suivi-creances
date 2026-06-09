@@ -2480,10 +2480,12 @@ def page_accueil():
     notes['echeance'] = notes['echeance'].fillna('').astype(str)
     notes['statut'] = notes['statut'].fillna('Ouvert').astype(str)
 
+    # Seules les notes explicitement assignées à l'utilisateur courant.
+    # Si le champ assigne_a est vide ET que l'auteur est l'utilisateur, on retombe
+    # sur les notes « auto-créées sans assignation » uniquement.
+    user_email = user['email'].lower()
     mes_notes = notes[
-        (notes['assigne_a'] == user['email']) |
-        (notes['auteur'].astype(str).str.lower() == user['email'].lower()) |
-        (notes['auteur'] == user['nom'])
+        notes['assigne_a'].astype(str).str.lower() == user_email
     ].copy()
     mes_notes = mes_notes[mes_notes['statut'] != 'Résolu']
 
