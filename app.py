@@ -80,10 +80,23 @@ HEADERS = {
                     'provision_risque', 'provision_creances_douteuses'],
     'resumes': ['comp_aux_num', 'ref_client', 'resume',
                 'action_resume', 'responsable_action',
+                'date_recouvrement', 'nature_creance',
                 'date_maj', 'auteur'],
     'consignations': ['comp_aux_num', 'ref_client', 'montant_consigne',
                       'date_consignation', 'commentaire'],
 }
+
+# Liste des natures de créance (export Direction)
+NATURES_CREANCE = [
+    '—',
+    'Procédure judiciaire',
+    'Avoir à émettre',
+    'A suivre par Eric',
+    'En cours',
+    'Relance huissier',
+    'Travaux à réaliser',
+    'Travaux terminés à relancer',
+]
 
 
 @st.cache_resource
@@ -1877,6 +1890,8 @@ def page_notes():
     cur_resume = ''
     cur_action = ''
     cur_resp = ''
+    cur_date_recouv = None
+    cur_nature = ''
     cur_resume_meta = ''
     if not df_res.empty and 'comp_aux_num' in df_res.columns:
         match = df_res[df_res['comp_aux_num'] == comp_aux_num]
@@ -1884,8 +1899,19 @@ def page_notes():
             cur_resume = str(match.iloc[0].get('resume', '') or '')
             cur_action = str(match.iloc[0].get('action_resume', '') or '')
             cur_resp = str(match.iloc[0].get('responsable_action', '') or '')
+            cur_nature = str(match.iloc[0].get('nature_creance', '') or '')
+            _dr = str(match.iloc[0].get('date_recouvrement', '') or '')
+            try:
+                if _dr:
+                    cur_date_recouv = pd.to_datetime(
+                        _dr, errors='coerce', dayfirst=True).date()
+            except Exception:
+                cur_date_recouv = None
             cur_resume_meta = (f"Mis à jour le {match.iloc[0].get('date_maj', '')} "
                                f"par {match.iloc[0].get('auteur', '')}")
+
+    nat_idx = NATURES_CREANCE.index(cur_nature) \
+        if cur_nature in NATURES_CREANCE else 0
 
     with st.form("resume_form", clear_on_submit=False):
         new_resume = st.text_input(
@@ -1904,6 +1930,12 @@ def page_notes():
             value=cur_resp,
             placeholder="Ex: Jean Dupont"
         )
+        cn1, cn2 = st.columns(2)
+        new_nature = cn1.selectbox(
+            "Nature de la créance", NATURES_CREANCE, index=nat_idx)
+        new_date_recouv = cn2.date_input(
+            "Date de recouvrement estimée", value=cur_date_recouv,
+            help="Date à laquelle on estime recevoir le règlement")
         resume_auteur = st.text_input(
             "Auteur (qui rédige ce résumé)",
             value=st.session_state.get('last_auteur', ''),
@@ -1919,6 +1951,9 @@ def page_notes():
                 'resume': new_resume.strip()[:100],
                 'action_resume': new_action.strip()[:100],
                 'responsable_action': new_resp.strip(),
+                'date_recouvrement': new_date_recouv.isoformat()
+                if new_date_recouv else '',
+                'nature_creance': new_nature if new_nature != '—' else '',
                 'date_maj': datetime.now().strftime('%Y-%m-%d %H:%M'),
                 'auteur': resume_auteur,
             }])
@@ -2298,6 +2333,8 @@ def page_export():
             last_resume = pd.DataFrame(columns=['comp_aux_num', 'note_resume',
                                                  'action_resume',
                                                  'responsable_action',
+                                                 'nature_creance',
+                                                 'date_recouvrement',
                                                  'date_note', 'auteur'])
             if not df_resumes.empty and 'comp_aux_num' in df_resumes.columns:
                 resumes_renamed = df_resumes.rename(columns={
@@ -2305,12 +2342,14 @@ def page_export():
                     'date_maj': 'date_note',
                 })
                 # Ajoute les colonnes manquantes si schéma ancien
-                for col in ('action_resume', 'responsable_action'):
+                for col in ('action_resume', 'responsable_action',
+                            'nature_creance', 'date_recouvrement'):
                     if col not in resumes_renamed.columns:
                         resumes_renamed[col] = ''
                 last_resume = resumes_renamed[
                     ['comp_aux_num', 'note_resume', 'action_resume',
-                     'responsable_action', 'date_note', 'auteur']
+                     'responsable_action', 'nature_creance',
+                     'date_recouvrement', 'date_note', 'auteur']
                 ].drop_duplicates('comp_aux_num')
 
             # Synthèse globale (créances ouvertes y compris contentieux)
@@ -2335,14 +2374,18 @@ def page_export():
                                f"(entités internes : {', '.join(EXCLUSIONS_DIRECTION)})")
 
             ws = wb.create_sheet("Synthèse Direction")
-            # Ordre : 1=Client 2=Commercial 3=Conducteur 4=État 5=Avancement
-            #        6=Date livraison 7=Date facture 8=Solde dû
-            #        9=Consigné [hidden] 10=Solde net [hidden] 11=Jours retard [hidden]
-            #        12=Prov risque 13=Prov créances douteuses
-            #        14=Résumé 15=Action 16=Responsable
-            #        17=Date MAJ 18=Auteur résumé 19=Statut
+            # Ordre :
+            #  1=Client 2=Commercial 3=Conducteur 4=État 5=Avancement facture
+            #  6=Nature créance 7=Date livraison 8=Date facture
+            #  9=Date recouvrement estimée 10=Solde dû
+            #  11=Consigné[H] 12=Solde net[H] 13=Jours retard[H]
+            #  14=Prov risque[H] 15=Prov créances douteuses[H]
+            #  16=Résumé 17=Action 18=Responsable
+            #  19=Date MAJ 20=Auteur résumé 21=Statut
             headers = ['Client', 'Commercial', 'Conducteur', 'État',
-                       'Avancement facture', 'Date livraison', 'Date facture',
+                       'Avancement facture', 'Nature créance',
+                       'Date livraison', 'Date facture',
+                       'Date recouvrement estimée',
                        'Solde dû (€)', 'Consigné huissier (€)', 'Solde net (€)',
                        'Jours retard max',
                        'Prov. risque (€)', 'Prov. créances douteuses (€)',
@@ -2397,8 +2440,10 @@ def page_export():
                     r['comp_aux_lib'],
                     r['commercial'], r['conducteur'], r['etat'],
                     r.get('_situation_last', '') or '',
+                    r.get('nature_creance', '') or '',
                     to_date_obj(r.get('date_livraison', '') or ''),
                     to_date_obj(r.get('_date_fact_last', '') or ''),
+                    to_date_obj(r.get('date_recouvrement', '') or ''),
                     round(solde_brut, 2),
                     round(consigne, 2),
                     round(solde_net, 2),
@@ -2415,9 +2460,9 @@ def page_export():
 
             total_row = ws.max_row + 1
             ws.cell(total_row, 1, 'TOTAL').font = Font(bold=True)
-            # Colonnes monétaires : H=Solde, I=Consigné, J=Solde net,
-            #                       L=Prov risque, M=Prov créances douteuses
-            for col_idx in (8, 9, 10, 12, 13):
+            # Colonnes monétaires : 10=Solde, 11=Consigné, 12=Solde net,
+            #                       14=Prov risque, 15=Prov créances douteuses
+            for col_idx in (10, 11, 12, 14, 15):
                 ws.cell(total_row, col_idx,
                         f'=SUM({get_column_letter(col_idx)}2:'
                         f'{get_column_letter(col_idx)}{total_row - 1})').font = Font(bold=True)
@@ -2426,8 +2471,9 @@ def page_export():
                     for c in row:
                         c.number_format = '#,##0.00 €'
 
-            # Format dates : F=Date livraison, G=Date facture, Q=Date MAJ
-            for col_idx in (6, 7, 17):
+            # Format dates : 7=Date livraison, 8=Date facture,
+            #                9=Date recouvrement, 19=Date MAJ
+            for col_idx in (7, 8, 9, 19):
                 for row in ws.iter_rows(min_row=2, max_row=total_row - 1,
                                          min_col=col_idx, max_col=col_idx):
                     for c in row:
@@ -2435,9 +2481,9 @@ def page_export():
 
             _autosize(ws)
 
-            # Masque les colonnes Consigné (I), Solde net (J), Jours retard (K),
-            # Prov. risque (L) et Prov. créances douteuses (M)
-            for letter in ('I', 'J', 'K', 'L', 'M'):
+            # Masque : Consigné (K=11), Solde net (L=12), Jours retard (M=13),
+            #          Prov. risque (N=14), Prov. créances douteuses (O=15)
+            for letter in ('K', 'L', 'M', 'N', 'O'):
                 ws.column_dimensions[letter].hidden = True
 
             # Fige les 5 premières colonnes + la ligne d'en-tête
