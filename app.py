@@ -96,6 +96,7 @@ NATURES_CREANCE = [
     'Relance huissier',
     'Travaux à réaliser',
     'Travaux terminés à relancer',
+    'Facturation sous-traitant',
 ]
 
 
