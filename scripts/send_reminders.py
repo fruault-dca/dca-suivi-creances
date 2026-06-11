@@ -15,7 +15,9 @@ Variables d'environnement requises (configurées dans GitHub Secrets) :
 """
 import json
 import os
+import random
 import smtplib
+import time
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -23,6 +25,7 @@ from email.mime.text import MIMEText
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 
 SCOPES = [
@@ -34,20 +37,44 @@ SCOPES = [
 J_URGENT = 3  # à traiter dans les 3 prochains jours
 
 
+def _with_retry(fn, *args, **kwargs):
+    """Retry avec backoff exponentiel sur les erreurs transitoires Google
+    (429 quota, 500/502/503 erreurs serveur)."""
+    last_exc = None
+    for attempt in range(5):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            msg = str(e)
+            transient = code in (429, 500, 502, 503) or any(
+                t in msg for t in ("429", "500", "502", "503",
+                                    "Quota exceeded", "Internal error"))
+            if not transient:
+                raise
+            last_exc = e
+            wait = (2 ** attempt) + random.random()
+            print(f"[retry] Erreur transitoire API Google ({code or '?'}), "
+                  f"nouvel essai dans {wait:.1f}s "
+                  f"(tentative {attempt + 1}/5)...")
+            time.sleep(wait)
+    raise last_exc
+
+
 def get_spreadsheet():
     raw = os.environ["GCP_SERVICE_ACCOUNT"]
     creds_dict = json.loads(raw)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
-    return client.open_by_key(os.environ["SHEET_ID"])
+    return _with_retry(client.open_by_key, os.environ["SHEET_ID"])
 
 
 def read_sheet(ss, name):
     try:
-        ws = ss.worksheet(name)
+        ws = _with_retry(ss.worksheet, name)
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
-    return pd.DataFrame(ws.get_all_records())
+    return pd.DataFrame(_with_retry(ws.get_all_records))
 
 
 def render_html(nom, en_retard, urgent, a_venir, sans_ech, app_url):
