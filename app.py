@@ -7,7 +7,7 @@ import pandas as pd
 import io
 from datetime import datetime
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import gspread
 from gspread.exceptions import APIError
@@ -2557,6 +2557,120 @@ def page_export():
                         c.number_format = '#,##0.00 €'
                 _autosize(ws2)
                 ws2.freeze_panes = 'B2'
+
+            # ============================================================
+            # Onglet : Évolution du dû clients (avant / après 22/05/2026)
+            # ============================================================
+            ws3 = wb.create_sheet("Évolution du dû", 0)  # en 1er onglet
+
+            CUTOFF_DU = pd.Timestamp(2026, 5, 22)
+            AGE_SEUIL = 10  # jours
+
+            raw = read_sheet('creances')
+            # Date de référence = dernier import FEC
+            ref_date = pd.Timestamp(datetime.now().date())
+            if not raw.empty and 'import_date' in raw.columns:
+                _imp = pd.to_datetime(raw['import_date'], errors='coerce')
+                if _imp.notna().any():
+                    ref_date = _imp.max().normalize()
+
+            if raw.empty:
+                ws3.append(["Aucune écriture FEC importée."])
+            else:
+                raw['debit'] = pd.to_numeric(raw['debit'],
+                                              errors='coerce').fillna(0)
+                raw['credit'] = pd.to_numeric(raw['credit'],
+                                               errors='coerce').fillna(0)
+                raw['_let'] = raw.get('ecriture_let', '').fillna('').astype(str) \
+                    .str.strip()
+                # En-cours = écritures non lettrées
+                op = raw[raw['_let'] == ''].copy()
+                op['_date'] = pd.to_datetime(op['ecriture_date'],
+                                              errors='coerce')
+                op['_jrn'] = op.get('journal_code', '').fillna('') \
+                    .astype(str).str.upper().str.strip()
+
+                is_vt = op['_jrn'].str.startswith('VT')
+                is_od = op['_jrn'].str.startswith('OD')
+
+                # --- Bloc 1 : factures émises AVANT la coupure ---
+                deb_avant = op[(op['debit'] > 0)
+                               & (op['_date'] < CUTOFF_DU)]['debit'].sum()
+                avoirs = op[is_vt & (op['credit'] > 0)]['credit'].sum()
+                compensation = op[is_od & (op['credit'] > 0)]['credit'].sum()
+                paiements = op[(~is_vt) & (~is_od)
+                               & (op['credit'] > 0)]['credit'].sum()
+                solde_old = deb_avant - avoirs - paiements - compensation
+
+                # --- Bloc 2 : factures émises APRÈS la coupure ---
+                deb_apres_df = op[(op['debit'] > 0)
+                                  & (op['_date'] >= CUTOFF_DU)].copy()
+                deb_apres = deb_apres_df['debit'].sum()
+                deb_apres_df['_age'] = (ref_date - deb_apres_df['_date']).dt.days
+                fact_sup10 = deb_apres_df[
+                    deb_apres_df['_age'] > AGE_SEUIL]['debit'].sum()
+                fact_inf10 = deb_apres_df[
+                    deb_apres_df['_age'] <= AGE_SEUIL]['debit'].sum()
+
+                en_cours = solde_old + deb_apres
+
+                ref_str = ref_date.strftime('%d/%m/%Y')
+                cut_str = CUTOFF_DU.strftime('%d/%m/%Y')
+
+                thin = Side(style='thin', color='2C3E50')
+                box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+                def _ligne(label, valeur, gras=False, encadre=False,
+                           indent=False, neg=False):
+                    r = ws3.max_row + 1
+                    cl = ws3.cell(r, 1, ("   " if indent else "") + label)
+                    cv = ws3.cell(r, 2, -valeur if neg else valeur)
+                    cv.number_format = '#,##0.00 €'
+                    if gras:
+                        cl.font = Font(name='Segoe UI', bold=True, size=11)
+                        cv.font = Font(name='Segoe UI', bold=True, size=11)
+                    if encadre:
+                        cl.fill = PatternFill('solid', start_color='EAF1E0')
+                        cv.fill = PatternFill('solid', start_color='EAF1E0')
+                        cl.border = box
+                        cv.border = box
+                    return r
+
+                # Titre
+                t = ws3.cell(1, 1, f"Évolution du dû clients — au {ref_str}")
+                t.font = Font(name='Segoe UI', bold=True, size=14,
+                              color='2C3E50')
+                ws3.append([])
+
+                # Bloc 1
+                _ligne(f"Factures émises avant le {cut_str}", deb_avant,
+                       gras=True, encadre=True)
+                ws3.append([])
+                _ligne("Avoirs émis", avoirs, indent=True, neg=True)
+                _ligne("Paiements reçus", paiements, indent=True, neg=True)
+                _ligne("Compensation", compensation, indent=True, neg=True)
+                ws3.append([])
+                _ligne(f"Solde au {ref_str}", solde_old,
+                       gras=True, encadre=True)
+                ws3.append([])
+                ws3.append([])
+
+                # Bloc 2
+                _ligne(f"Factures émises après le {cut_str}", deb_apres,
+                       gras=True, encadre=True)
+                _ligne(f"Émission factures > {AGE_SEUIL}j", fact_sup10,
+                       indent=True)
+                _ligne(f"Émission factures ≤ {AGE_SEUIL}j", fact_inf10,
+                       indent=True)
+                ws3.append([])
+                ws3.append([])
+
+                # Bloc 3
+                _ligne(f"En cours clients au {ref_str}", en_cours,
+                       gras=True, encadre=True)
+
+                ws3.column_dimensions['A'].width = 38
+                ws3.column_dimensions['B'].width = 18
 
             buf = io.BytesIO()
             wb.save(buf)
