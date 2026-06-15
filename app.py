@@ -2565,6 +2565,8 @@ def page_export():
 
             CUTOFF_DU = pd.Timestamp(2026, 5, 22)
             AGE_SEUIL = 10  # jours
+            # Référence figée des factures émises avant la coupure (snapshot 22/05/2026)
+            FACTURES_AVANT_REF = 1111971.48
 
             raw = read_sheet('creances')
             # Date de référence = dernier import FEC
@@ -2585,34 +2587,40 @@ def page_export():
                     .str.strip()
                 # En-cours = écritures non lettrées
                 op = raw[raw['_let'] == ''].copy()
-                op['_date'] = pd.to_datetime(op['ecriture_date'],
-                                              errors='coerce')
                 op['_jrn'] = op.get('journal_code', '').fillna('') \
                     .astype(str).str.upper().str.strip()
-
                 is_vt = op['_jrn'].str.startswith('VT')
                 is_od = op['_jrn'].str.startswith('OD')
 
-                # --- Bloc 1 : factures émises AVANT la coupure ---
-                deb_avant = op[(op['debit'] > 0)
-                               & (op['_date'] < CUTOFF_DU)]['debit'].sum()
+                # En-cours total = Total dû de l'application (même calcul que la sidebar)
+                enr = load_creances_enrichies(only_open=True)
+                enr = enr[enr['solde'].abs() > 0.01]
+                en_cours = enr['solde'].sum()
+
+                # Date d'émission effective par facture (PROGEMI > pièce > écriture)
+                enr['_dem'] = pd.to_datetime(enr.get('date_facture_eff', ''),
+                                              errors='coerce')
+                enr['_dem'] = enr['_dem'].fillna(
+                    pd.to_datetime(enr['ecriture_date'], errors='coerce'))
+
+                # --- Bloc 2 : nouveau dû (factures émises APRÈS la coupure) ---
+                new_df = enr[enr['_dem'] >= CUTOFF_DU].copy()
+                new_total = new_df['solde'].sum()
+                new_df['_age'] = (ref_date - new_df['_dem']).dt.days
+                fact_sup10 = new_df[new_df['_age'] > AGE_SEUIL]['solde'].sum()
+                fact_inf10 = new_df[new_df['_age'] <= AGE_SEUIL]['solde'].sum()
+
+                # --- Bloc 1 : ancien dû (factures émises AVANT la coupure) ---
+                # Baseline figée ; solde réel = en-cours - nouveau dû (réconcilie)
+                deb_avant = FACTURES_AVANT_REF
+                solde_old = en_cours - new_total
+                # Mouvements depuis la coupure (crédits non lettrés par journal)
                 avoirs = op[is_vt & (op['credit'] > 0)]['credit'].sum()
                 compensation = op[is_od & (op['credit'] > 0)]['credit'].sum()
                 paiements = op[(~is_vt) & (~is_od)
                                & (op['credit'] > 0)]['credit'].sum()
-                solde_old = deb_avant - avoirs - paiements - compensation
-
-                # --- Bloc 2 : factures émises APRÈS la coupure ---
-                deb_apres_df = op[(op['debit'] > 0)
-                                  & (op['_date'] >= CUTOFF_DU)].copy()
-                deb_apres = deb_apres_df['debit'].sum()
-                deb_apres_df['_age'] = (ref_date - deb_apres_df['_date']).dt.days
-                fact_sup10 = deb_apres_df[
-                    deb_apres_df['_age'] > AGE_SEUIL]['debit'].sum()
-                fact_inf10 = deb_apres_df[
-                    deb_apres_df['_age'] <= AGE_SEUIL]['debit'].sum()
-
-                en_cours = solde_old + deb_apres
+                # Écart pour réconcilier baseline - mouvements = solde réel
+                autres = deb_avant - avoirs - paiements - compensation - solde_old
 
                 ref_str = ref_date.strftime('%d/%m/%Y')
                 cut_str = CUTOFF_DU.strftime('%d/%m/%Y')
@@ -2649,6 +2657,9 @@ def page_export():
                 _ligne("Avoirs émis", avoirs, indent=True, neg=True)
                 _ligne("Paiements reçus", paiements, indent=True, neg=True)
                 _ligne("Compensation", compensation, indent=True, neg=True)
+                if abs(autres) > 0.01:
+                    _ligne("Autres régularisations", autres, indent=True,
+                           neg=True)
                 ws3.append([])
                 _ligne(f"Solde au {ref_str}", solde_old,
                        gras=True, encadre=True)
@@ -2656,7 +2667,7 @@ def page_export():
                 ws3.append([])
 
                 # Bloc 2
-                _ligne(f"Factures émises après le {cut_str}", deb_apres,
+                _ligne(f"Factures émises après le {cut_str}", new_total,
                        gras=True, encadre=True)
                 _ligne(f"Émission factures > {AGE_SEUIL}j", fact_sup10,
                        indent=True)
