@@ -2490,6 +2490,74 @@ def page_export():
             # Fige les 5 premières colonnes + la ligne d'en-tête
             ws.freeze_panes = 'F2'
 
+            # ============================================================
+            # Onglet TCD : nature de créance × semaine d'encaissement prévue
+            # ============================================================
+            ws2 = wb.create_sheet("Encaissements par semaine")
+            piv = synth_d.copy()
+            # date_recouvrement est stocké en ISO (YYYY-MM-DD) → pas de dayfirst
+            piv['_dt_recouv'] = pd.to_datetime(
+                piv.get('date_recouvrement', ''), errors='coerce')
+            piv = piv[piv['_dt_recouv'].notna()].copy()
+
+            if piv.empty:
+                ws2.append(["Aucune date de recouvrement estimée renseignée."])
+                ws2.append(["Renseignez-les dans Notes & Relances → "
+                            "Résumé direction."])
+            else:
+                piv['solde'] = pd.to_numeric(piv['solde'],
+                                              errors='coerce').fillna(0)
+                # Nature vide / placeholder → "Non renseigné"
+                piv['nature_creance'] = piv['nature_creance'].fillna('') \
+                    .astype(str).str.strip()
+                piv.loc[piv['nature_creance'].isin(['', '—']),
+                        'nature_creance'] = 'Non renseigné'
+                # Lundi de la semaine = clé de tri ; libellé lisible
+                piv['_lundi'] = (piv['_dt_recouv']
+                                 - pd.to_timedelta(piv['_dt_recouv'].dt.weekday,
+                                                    unit='D'))
+                piv['_sem_label'] = (
+                    'S' + piv['_dt_recouv'].dt.isocalendar().week
+                    .astype(int).astype(str).str.zfill(2)
+                    + ' (' + piv['_lundi'].dt.strftime('%d/%m/%Y') + ')')
+
+                # Ordre chronologique des colonnes
+                sem_order = (piv[['_lundi', '_sem_label']]
+                             .drop_duplicates()
+                             .sort_values('_lundi')['_sem_label'].tolist())
+
+                pivot = pd.pivot_table(
+                    piv, values='solde', index='nature_creance',
+                    columns='_sem_label', aggfunc='sum', fill_value=0)
+                pivot = pivot.reindex(columns=sem_order, fill_value=0)
+
+                # En-tête
+                header2 = ['Nature de créance'] + sem_order + ['Total']
+                ws2.append(header2)
+                for c in ws2[1]:
+                    _style_header(c)
+
+                for nature, prow in pivot.iterrows():
+                    vals = [round(float(prow.get(s, 0) or 0), 2)
+                            for s in sem_order]
+                    ws2.append([nature] + vals + [round(sum(vals), 2)])
+
+                # Ligne TOTAL par semaine
+                tr2 = ws2.max_row + 1
+                ws2.cell(tr2, 1, 'TOTAL').font = Font(bold=True)
+                for j in range(2, len(header2) + 1):
+                    cl = get_column_letter(j)
+                    ws2.cell(tr2, j,
+                             f'=SUM({cl}2:{cl}{tr2 - 1})').font = Font(bold=True)
+
+                # Format € sur toutes les cellules de montant
+                for row in ws2.iter_rows(min_row=2, max_row=tr2,
+                                          min_col=2, max_col=len(header2)):
+                    for c in row:
+                        c.number_format = '#,##0.00 €'
+                _autosize(ws2)
+                ws2.freeze_panes = 'B2'
+
             buf = io.BytesIO()
             wb.save(buf)
             st.download_button(
