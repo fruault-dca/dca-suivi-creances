@@ -701,7 +701,11 @@ def load_creances_enrichies(only_open=True):
     df_c['jours_retard'] = (today - df_c['_dt']).dt.days
     df_c['jours_retard'] = df_c['jours_retard'].fillna(0).astype(int).clip(lower=0)
     # Date de facture effective (priorité PROGEMI > FEC piece_date > ecriture_date)
-    df_c['date_facture_eff'] = df_c['_dt'].dt.strftime('%Y-%m-%d').fillna('')
+    df_c['date_facture_eff'] = df_c['_dt'].dt.strftime('%Y-%m-%d')
+    # Filet de sécurité : si rien n'a pu être daté, garder l'écriture brute
+    df_c['date_facture_eff'] = df_c['date_facture_eff'].fillna(
+        df_c['ecriture_date'].fillna('').astype(str))
+    df_c['date_facture_eff'] = df_c['date_facture_eff'].fillna('')
     df_c = df_c.drop(columns=['_dt', '_dt_progemi', '_dt_piece', '_dt_ecr'])
 
     # Flag chantier livré : si date_reception est renseignée
@@ -1228,10 +1232,20 @@ def page_import():
                     open_pk = set(enr_open['piece_ref'].apply(_norm_piece)) \
                         if not enr_open.empty else set()
 
-                    # Ne garde que les Hors CRM encore dues
+                    # Ne garde que les Hors CRM encore dues, dédupliquées par n°
                     hors = hors_all[hors_all['piece_ref'].apply(_norm_piece)
-                                    .isin(open_pk)]
-                    nb_soldees = len(hors_all) - len(hors)
+                                    .isin(open_pk)].copy()
+                    # Dédoublonnage par n° de facture : garde la ligne qui a une
+                    # date_facture si elle existe (évite d'afficher un doublon vide)
+                    if 'date_facture' in hors.columns:
+                        hors['_hasdate'] = hors['date_facture'].fillna('') \
+                            .astype(str).str.strip().ne('').astype(int)
+                        hors = hors.sort_values('_hasdate', ascending=False)
+                    hors['_pkn'] = hors['piece_ref'].apply(_norm_piece)
+                    hors = hors.drop_duplicates('_pkn')
+                    nb_soldees = len(hors_all) - len(
+                        hors_all[hors_all['piece_ref'].apply(_norm_piece)
+                                 .isin(open_pk)])
 
                     st.write(f"{len(hors)} facture(s) Hors CRM encore due(s)")
                     if nb_soldees:
@@ -1274,14 +1288,20 @@ def page_import():
                             df_m_upd = df_m.copy()
                             if 'date_facture' not in df_m_upd.columns:
                                 df_m_upd['date_facture'] = ''
-                            df_m_upd.loc[i_h, 'date_facture'] = \
+                            # Applique la date à TOUTES les lignes du même n°
+                            # (gère les éventuels doublons de mapping)
+                            pk_target = _norm_piece(hr['piece_ref'])
+                            mask_pk = df_m_upd['piece_ref'].apply(_norm_piece) == pk_target
+                            df_m_upd.loc[mask_pk, 'date_facture'] = \
                                 new_df_date.isoformat() if new_df_date else ''
                             replace_sheet('mapping', df_m_upd)
                             st.success(f"Date enregistrée pour {hr['piece_ref']}")
                             st.rerun()
                         if cc4.button("↶", key=f"unhors_{i_h}_{hr['piece_ref']}",
                                       help="Annuler le statut Hors CRM"):
-                            df_m_cleaned = df_m[df_m['piece_ref'] != hr['piece_ref']]
+                            pk_t = _norm_piece(hr['piece_ref'])
+                            df_m_cleaned = df_m[df_m['piece_ref'].apply(_norm_piece)
+                                                != pk_t]
                             replace_sheet('mapping', df_m_cleaned)
                             st.rerun()
 
