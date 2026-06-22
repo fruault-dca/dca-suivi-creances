@@ -1220,8 +1220,35 @@ def page_import():
             if not df_m.empty and (df_m['ref_client'] == '__HORS_CRM__').any():
                 with st.expander("⊘ Factures marquées Hors CRM "
                                  "(saisir la date de facture / réaffecter)"):
-                    hors = df_m[df_m['ref_client'] == '__HORS_CRM__']
-                    st.write(f"{len(hors)} facture(s) marquée(s) Hors CRM")
+                    hors_all = df_m[df_m['ref_client'] == '__HORS_CRM__']
+
+                    # Référentiel des factures encore dues (net FIFO)
+                    enr_open = load_creances_enrichies(only_open=True)
+                    enr_open = enr_open[enr_open['solde'].abs() > 0.01]
+                    open_pk = set(enr_open['piece_ref'].apply(_norm_piece)) \
+                        if not enr_open.empty else set()
+
+                    # Ne garde que les Hors CRM encore dues
+                    hors = hors_all[hors_all['piece_ref'].apply(_norm_piece)
+                                    .isin(open_pk)]
+                    nb_soldees = len(hors_all) - len(hors)
+
+                    st.write(f"{len(hors)} facture(s) Hors CRM encore due(s)")
+                    if nb_soldees:
+                        cinfo, cbtn = st.columns([3, 1])
+                        cinfo.caption(f"🧾 {nb_soldees} facture(s) Hors CRM soldée(s) "
+                                      f"masquée(s).")
+                        if cbtn.button("🧹 Purger les soldées",
+                                       key="purge_hors_soldees",
+                                       help="Retire définitivement les Hors CRM "
+                                            "soldées de la feuille mapping"):
+                            keep = df_m[~(
+                                (df_m['ref_client'] == '__HORS_CRM__')
+                                & (~df_m['piece_ref'].apply(_norm_piece)
+                                   .isin(open_pk)))]
+                            replace_sheet('mapping', keep)
+                            st.success(f"✅ {nb_soldees} facture(s) soldée(s) purgée(s)")
+                            st.rerun()
                     st.caption("💡 Saisissez la date de facture pour les anciennes "
                                "factures (utile après clôture comptable, quand la "
                                "date de pièce du FEC repasse au 01/01).")
