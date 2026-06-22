@@ -1305,6 +1305,74 @@ def page_import():
                             replace_sheet('mapping', df_m_cleaned)
                             st.rerun()
 
+            # --- Saisie manuelle de date pour n'importe quelle facture ---
+            st.divider()
+            with st.expander("📅 Corriger / saisir une date de facture "
+                             "(factures hors PROGEMI mappées, etc.)"):
+                st.caption("Recherchez une facture pour fixer sa date manuellement. "
+                           "Utile pour les factures absentes du PROGEMI mais "
+                           "rattachées à un dossier CRM.")
+                enr_d = load_creances_enrichies(only_open=True)
+                enr_d = enr_d[enr_d['solde'].abs() > 0.01]
+                if enr_d.empty:
+                    st.info("Aucune facture ouverte.")
+                else:
+                    qd = st.text_input("🔎 Rechercher (n° facture ou client)",
+                                       key="search_datefact").strip().lower()
+                    base = enr_d.copy()
+                    if qd:
+                        base = base[
+                            base['piece_ref'].astype(str).str.lower()
+                            .str.contains(qd, na=False)
+                            | base['comp_aux_lib'].astype(str).str.lower()
+                            .str.contains(qd, na=False)]
+                    base = base.drop_duplicates('piece_ref').head(30)
+                    if base.empty:
+                        st.caption("Aucune facture ne correspond.")
+                    for _, rr in base.iterrows():
+                        pr = str(rr['piece_ref'])
+                        dd1, dd2, dd3 = st.columns([3, 2, 1])
+                        dd1.write(f"**{pr}** — {rr['comp_aux_lib']}")
+                        dd1.caption(f"Dossier {rr.get('ref_client', '') or '—'} · "
+                                    f"date actuelle : {rr.get('date_facture_eff', '') or '—'}")
+                        # Pré-remplissage avec la date_facture du mapping si présente
+                        cur = None
+                        mrow = df_m[df_m['piece_ref'].apply(_norm_piece)
+                                    == _norm_piece(pr)]
+                        if not mrow.empty:
+                            _v = str(mrow.iloc[0].get('date_facture', '') or '')
+                            if _v and _v.lower() != 'nan':
+                                cur = pd.to_datetime(_v, errors='coerce',
+                                                     dayfirst=True)
+                                cur = cur.date() if pd.notna(cur) else None
+                        ndate = dd2.date_input(
+                            "Date facture", value=cur,
+                            key=f"dfman_{pr}", format="DD/MM/YYYY",
+                            label_visibility="collapsed")
+                        if dd3.button("💾", key=f"savedf_{pr}",
+                                      help="Enregistrer la date"):
+                            df_m_upd = df_m.copy()
+                            if 'date_facture' not in df_m_upd.columns:
+                                df_m_upd['date_facture'] = ''
+                            pk_t = _norm_piece(pr)
+                            mask_pk = df_m_upd['piece_ref'].apply(_norm_piece) == pk_t
+                            val = ndate.isoformat() if ndate else ''
+                            if mask_pk.any():
+                                df_m_upd.loc[mask_pk, 'date_facture'] = val
+                            else:
+                                # Pas de ligne mapping : on en crée une
+                                new_r = pd.DataFrame([{
+                                    'piece_ref': pr,
+                                    'ref_client': rr.get('ref_client', '') or '',
+                                    'comp_aux_num': rr.get('comp_aux_num', '') or '',
+                                    'date_facture': val,
+                                }])
+                                df_m_upd = pd.concat([df_m_upd, new_r],
+                                                     ignore_index=True)
+                            replace_sheet('mapping', df_m_upd)
+                            st.success(f"Date enregistrée pour {pr}")
+                            st.rerun()
+
     with tab4:
         st.markdown("**Gestion des dossiers en contentieux**")
         st.caption("Les dossiers listés ici sont exclus de l'export commerciaux "
