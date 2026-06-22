@@ -2201,13 +2201,14 @@ def page_export():
             non_map = df_ec[df_ec['commercial'].fillna('') == '']
             if not non_map.empty:
                 ws = wb.create_sheet("Non rattachés")
-                ws.append(['Client FEC', 'Code compta', 'Réf. pièce', 'Date',
-                           'Libellé', 'Solde'])
+                ws.append(['Client FEC', 'Code compta', 'Réf. pièce',
+                           'Date facture', 'Libellé', 'Solde'])
                 for c in ws[1]:
                     _style_header(c)
                 for _, r in non_map.iterrows():
                     ws.append([r['comp_aux_lib'], r['comp_aux_num'], r['piece_ref'],
-                               to_date_obj(r['ecriture_date']),
+                               to_date_obj(r.get('date_facture_eff', '')
+                                           or r['ecriture_date']),
                                r['ecriture_lib'], round(r['solde'], 2)])
                 # Format date colonne D
                 for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
@@ -2455,18 +2456,20 @@ def page_export():
             df_dir = df_dir.copy()
             if 'situation' not in df_dir.columns:
                 df_dir['situation'] = ''
-            if 'date_facture' not in df_dir.columns:
-                df_dir['date_facture'] = ''
-            df_dir['date_facture'] = df_dir['date_facture'].fillna('').astype(str)
-            df_dir['_dt_fact'] = pd.to_datetime(df_dir['date_facture'],
-                                                 errors='coerce', dayfirst=True)
+            # Date de facture effective (cascade : PROGEMI/manuel > pièce > écriture)
+            if 'date_facture_eff' not in df_dir.columns:
+                df_dir['date_facture_eff'] = ''
+            df_dir['date_facture_eff'] = df_dir['date_facture_eff'] \
+                .fillna('').astype(str)
+            df_dir['_dt_fact'] = pd.to_datetime(df_dir['date_facture_eff'],
+                                                 errors='coerce')
 
-            # Garde la situation et date_facture de la facture la plus récente
+            # Garde la situation et date facture de la facture la plus récente
             df_dir_sorted = df_dir.sort_values('_dt_fact', ascending=False)
             last_fact = df_dir_sorted.drop_duplicates('comp_aux_num')[
-                ['comp_aux_num', 'situation', 'date_facture']
+                ['comp_aux_num', 'situation', 'date_facture_eff']
             ].rename(columns={'situation': '_situation_last',
-                               'date_facture': '_date_fact_last'})
+                               'date_facture_eff': '_date_fact_last'})
 
             synth_d = df_dir.groupby(['comp_aux_num', 'comp_aux_lib',
                                        'commercial', 'conducteur',
