@@ -1317,16 +1317,23 @@ def page_import():
                 if enr_d.empty:
                     st.info("Aucune facture ouverte.")
                 else:
-                    qd = st.text_input("🔎 Rechercher (n° facture ou client)",
-                                       key="search_datefact").strip().lower()
+                    qd = st.text_input(
+                        "🔎 Rechercher (n° facture, client FEC, client CRM "
+                        "ou n° dossier)",
+                        key="search_datefact").strip().lower()
                     base = enr_d.copy()
                     if qd:
+                        def _col(c):
+                            return base[c].astype(str).str.lower().str.contains(
+                                qd, na=False) if c in base.columns \
+                                else pd.Series(False, index=base.index)
                         base = base[
-                            base['piece_ref'].astype(str).str.lower()
-                            .str.contains(qd, na=False)
-                            | base['comp_aux_lib'].astype(str).str.lower()
-                            .str.contains(qd, na=False)]
-                    base = base.drop_duplicates('piece_ref').head(30)
+                            _col('piece_ref') | _col('comp_aux_lib')
+                            | _col('client') | _col('ref_client')
+                            | _col('comp_aux_num')]
+                    base = base.drop_duplicates('piece_ref').head(50)
+                    if qd:
+                        st.caption(f"{len(base)} facture(s) trouvée(s)")
                     if base.empty:
                         st.caption("Aucune facture ne correspond.")
                     for _, rr in base.iterrows():
