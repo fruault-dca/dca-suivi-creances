@@ -1216,16 +1216,44 @@ def page_import():
                         replace_sheet('mapping', df_m_updated)
                         st.rerun()
 
-            # --- Section Hors CRM : permet de revenir en arrière ---
+            # --- Section Hors CRM : date de facture manuelle + réaffectation ---
             if not df_m.empty and (df_m['ref_client'] == '__HORS_CRM__').any():
-                with st.expander("⊘ Factures marquées Hors CRM (cliquer pour réaffecter)"):
+                with st.expander("⊘ Factures marquées Hors CRM "
+                                 "(saisir la date de facture / réaffecter)"):
                     hors = df_m[df_m['ref_client'] == '__HORS_CRM__']
                     st.write(f"{len(hors)} facture(s) marquée(s) Hors CRM")
+                    st.caption("💡 Saisissez la date de facture pour les anciennes "
+                               "factures (utile après clôture comptable, quand la "
+                               "date de pièce du FEC repasse au 01/01).")
                     for i_h, hr in hors.iterrows():
-                        cc1, cc2 = st.columns([3, 1])
-                        cc1.write(f"**{hr['piece_ref']}** ({hr['comp_aux_num']})")
-                        if cc2.button("↶ Annuler",
-                                       key=f"unhors_{i_h}_{hr['piece_ref']}_{hr['comp_aux_num']}"):
+                        cc1, cc2, cc3, cc4 = st.columns([3, 2, 1, 1])
+                        cc1.write(f"**{hr['piece_ref']}**")
+                        cc1.caption(f"{hr['comp_aux_num']}")
+                        # Date actuelle si déjà saisie
+                        cur_df = None
+                        _dfv = str(hr.get('date_facture', '') or '')
+                        if _dfv and _dfv.lower() != 'nan':
+                            try:
+                                cur_df = pd.to_datetime(
+                                    _dfv, errors='coerce', dayfirst=True).date()
+                            except Exception:
+                                cur_df = None
+                        new_df_date = cc2.date_input(
+                            "Date facture", value=cur_df,
+                            key=f"horsdate_{i_h}_{hr['piece_ref']}",
+                            format="DD/MM/YYYY", label_visibility="collapsed")
+                        if cc3.button("💾", key=f"savehd_{i_h}_{hr['piece_ref']}",
+                                      help="Enregistrer la date"):
+                            df_m_upd = df_m.copy()
+                            if 'date_facture' not in df_m_upd.columns:
+                                df_m_upd['date_facture'] = ''
+                            df_m_upd.loc[i_h, 'date_facture'] = \
+                                new_df_date.isoformat() if new_df_date else ''
+                            replace_sheet('mapping', df_m_upd)
+                            st.success(f"Date enregistrée pour {hr['piece_ref']}")
+                            st.rerun()
+                        if cc4.button("↶", key=f"unhors_{i_h}_{hr['piece_ref']}",
+                                      help="Annuler le statut Hors CRM"):
                             df_m_cleaned = df_m[df_m['piece_ref'] != hr['piece_ref']]
                             replace_sheet('mapping', df_m_cleaned)
                             st.rerun()
