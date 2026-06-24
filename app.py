@@ -99,6 +99,44 @@ NATURES_CREANCE = [
     'Facturation sous-traitant',
 ]
 
+# Appels de fonds (stades d'avancement) — l'ordre est fixe, les libellés
+# peuvent varier légèrement. On détecte le n° de stade par mots-clés.
+APPELS_DE_FONDS = [
+    "1. Accord PC / Démarrage",
+    "2. Fondations",
+    "3. Achèvement des murs / Fin de maçonnerie",
+    "4. Mise hors d'eau",
+    "5. Hors d'air et fin de cloison",
+    "6. Fin de pose d'équipement",
+    "7. Réception",
+]
+
+
+def stage_from_situation(s):
+    """Renvoie le n° d'appel de fonds (1-7) depuis un libellé de situation.
+    0 si non reconnu. Détection tolérante (accents/casse/variantes)."""
+    import unicodedata as _u
+    s = str(s or '').lower()
+    s = _u.normalize('NFKD', s).encode('ascii', 'ignore').decode()
+    if not s.strip():
+        return 0
+    # Du plus tardif au plus précoce, avec mots-clés distinctifs
+    if 'reception' in s:
+        return 7
+    if 'equipement' in s or 'pose' in s:
+        return 6
+    if 'air' in s or 'cloison' in s:
+        return 5
+    if 'eau' in s:
+        return 4
+    if 'mur' in s or 'maconnerie' in s or 'achevement' in s:
+        return 3
+    if 'fondation' in s:
+        return 2
+    if 'accord' in s or 'demarrage' in s or 'pc' in s:
+        return 1
+    return 0
+
 
 @st.cache_resource
 def get_gspread_client():
@@ -2210,25 +2248,41 @@ def page_export():
     df = df_all[~df_all.get('contentieux', False)] if 'contentieux' in df_all.columns \
         else df_all
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Export commerciaux", "Export Power BI",
-                                       "Export Contentieux", "Export Direction"])
+    # Stade d'avancement (appel de fonds) par facture puis par dossier.
+    # Règle : tant que le dossier n'a pas dépassé "Fondations" (stade 2),
+    # les factures sont suivies par le commercial. Dès le stade 3, TOUTES
+    # les factures du dossier (y compris fondations) passent au conducteur.
+    df = df.copy()
+    df['_stage'] = df['situation'].apply(stage_from_situation) \
+        if 'situation' in df.columns else 0
+    # Stade max connu par dossier (ref_client)
+    known = df[df['_stage'] > 0]
+    dossier_stage = known.groupby('ref_client')['_stage'].max() \
+        if not known.empty else pd.Series(dtype=int)
+    df['_dstage'] = df['ref_client'].map(dossier_stage).fillna(0).astype(int)
+    # Routage : conducteur si stade dossier >= 3 OU chantier livré ; sinon commercial
+    est_livre_col = df['est_livre'] if 'est_livre' in df.columns else False
+    to_cond = (df['_dstage'] >= 3) | est_livre_col
+    df_comm = df[~to_cond]
+    df_cond = df[to_cond]
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Export commerciaux", "Export conducteurs", "Export Power BI",
+        "Export Contentieux", "Export Direction"])
 
     with tab1:
-        st.markdown("Classeur Excel : 1 feuille par commercial avec **uniquement les "
-                    "chantiers en cours** (livrés et contentieux exclus). "
-                    "Détail facture par facture avec jours depuis émission colorés.")
+        st.markdown("Classeur Excel : 1 feuille par commercial. Contient **uniquement "
+                    "les dossiers jusqu'à l'appel de fonds Fondations (stade 2)**. "
+                    "Dès le stade 3 (achèvement des murs), le dossier bascule sur "
+                    "l'export conducteurs. Contentieux exclus.")
 
-        # Filtre : uniquement chantiers en cours (livrés exclus, contentieux déjà exclu)
-        df_ec = df[~df.get('est_livre', False)] if 'est_livre' in df.columns else df
+        df_ec = df_comm
 
-        nb_excl_livres = df['est_livre'].sum() if 'est_livre' in df.columns else 0
-        if nb_excl_livres or not df_ctx.empty:
-            msgs = []
-            if not df_ctx.empty:
-                msgs.append(f"{df_ctx['ref_client'].nunique()} dossier(s) contentieux")
-            if nb_excl_livres:
-                msgs.append(f"{nb_excl_livres} ligne(s) chantier livré")
-            st.caption("ℹ️ Exclus de cet export : " + ", ".join(msgs))
+        st.caption(f"ℹ️ {df_ec['ref_client'].replace('', pd.NA).nunique()} dossier(s) "
+                   f"commercial · {df_cond['ref_client'].replace('', pd.NA).nunique()} "
+                   f"dossier(s) bascule(s) conducteur · "
+                   f"{df_ctx['ref_client'].nunique() if not df_ctx.empty else 0} "
+                   f"contentieux")
 
         if st.button("🔧 Générer l'export commerciaux", type="primary"):
             wb = openpyxl.Workbook()
@@ -2340,6 +2394,112 @@ def page_export():
             )
 
     with tab2:
+        st.markdown("Classeur Excel : 1 feuille par **conducteur de travaux**. "
+                    "Contient les dossiers ayant **dépassé les fondations "
+                    "(stade 3+)** ainsi que les chantiers livrés — c'est le "
+                    "conducteur qui relance les appels de fonds suivants. "
+                    "Toutes les factures du dossier sont incluses (y compris "
+                    "fondations).")
+        if df_cond.empty:
+            st.info("Aucun dossier au stade 3+ pour le moment.")
+        else:
+            st.caption(f"{df_cond['ref_client'].replace('', pd.NA).nunique()} "
+                       f"dossier(s) concerné(s).")
+            if st.button("🔧 Générer l'export conducteurs", type="primary"):
+                wb = openpyxl.Workbook()
+                wb.remove(wb.active)
+
+                def _fill_jours_c(j):
+                    try:
+                        j = int(j)
+                    except Exception:
+                        return None
+                    if j <= 0:
+                        return None
+                    if j < 7:
+                        return PatternFill('solid', start_color='C0DD97')
+                    if j <= 15:
+                        return PatternFill('solid', start_color='F5D7A8')
+                    return PatternFill('solid', start_color='F5BEB6')
+
+                cond_col = 'conducteur' if 'conducteur' in df_cond.columns else None
+                conducteurs = sorted(df_cond[cond_col].dropna().unique()) \
+                    if cond_col else []
+
+                for cond in conducteurs:
+                    if not cond:
+                        continue
+                    df_cc = df_cond[df_cond[cond_col] == cond] \
+                        .sort_values(['comp_aux_lib', 'date_facture_eff'])
+                    if df_cc.empty:
+                        continue
+                    safe = str(cond)[:31].replace('/', '-').replace('\\', '-')
+                    ws = wb.create_sheet(safe)
+                    headers = ['Client', 'Ref dossier', 'N° facture',
+                               'Date facture', 'Appel de fonds', 'Libellé',
+                               'Solde dû (€)', 'Jours depuis facture', 'État']
+                    ws.append(headers)
+                    for c in ws[1]:
+                        _style_header(c)
+                    for _, r in df_cc.iterrows():
+                        jours = int(r.get('jours_retard', 0) or 0)
+                        stg = int(r.get('_stage', 0) or 0)
+                        af = APPELS_DE_FONDS[stg - 1] if 1 <= stg <= 7 else ''
+                        ws.append([
+                            r['comp_aux_lib'], r['ref_client'], r['piece_ref'],
+                            to_date_obj(r.get('date_facture_eff', '')
+                                        or r['ecriture_date']),
+                            af, r['ecriture_lib'],
+                            round(r['solde'], 2), jours, r['etat']
+                        ])
+                        fill = _fill_jours_c(jours)
+                        if fill is not None:
+                            ws.cell(ws.max_row, 8).fill = fill
+                    last = ws.max_row + 1
+                    ws.cell(last, 1, 'TOTAL').font = Font(bold=True)
+                    ws.cell(last, 7, f'=SUM(G2:G{last - 1})').font = Font(bold=True)
+                    for row in ws.iter_rows(min_row=2, max_row=last,
+                                             min_col=7, max_col=7):
+                        for c in row:
+                            c.number_format = '#,##0.00 €'
+                    for row in ws.iter_rows(min_row=2, max_row=last - 1,
+                                             min_col=4, max_col=4):
+                        for c in row:
+                            c.number_format = 'DD/MM/YYYY'
+                    _autosize(ws)
+                    ws.freeze_panes = 'A2'
+
+                # Dossiers stade 3+ sans conducteur renseigné
+                sans_cond = df_cond[df_cond[cond_col].fillna('') == ''] \
+                    if cond_col else df_cond
+                if not sans_cond.empty:
+                    ws = wb.create_sheet("Sans conducteur")
+                    ws.append(['Client', 'Ref dossier', 'N° facture',
+                               'Date facture', 'Solde dû (€)', 'État'])
+                    for c in ws[1]:
+                        _style_header(c)
+                    for _, r in sans_cond.iterrows():
+                        ws.append([r['comp_aux_lib'], r['ref_client'],
+                                   r['piece_ref'],
+                                   to_date_obj(r.get('date_facture_eff', '')
+                                               or r['ecriture_date']),
+                                   round(r['solde'], 2), r['etat']])
+                    for row in ws.iter_rows(min_row=2, max_row=ws.max_row,
+                                             min_col=4, max_col=4):
+                        for c in row:
+                            c.number_format = 'DD/MM/YYYY'
+                    _autosize(ws)
+
+                buf = io.BytesIO()
+                wb.save(buf)
+                st.download_button(
+                    "📥 Télécharger (relances_conducteurs.xlsx)",
+                    data=buf.getvalue(),
+                    file_name=f"relances_conducteurs_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+    with tab3:
         st.markdown("Dataset plat pour Power BI avec tranches d'âge et dernière relance.")
         if st.button("🔧 Générer l'export Power BI", type="primary"):
             pbi = df.copy()
@@ -2374,7 +2534,7 @@ def page_export():
             )
             st.caption("💡 Power BI : Obtenir les données → Excel → charger les 3 feuilles.")
 
-    with tab3:
+    with tab4:
         st.markdown("Export des dossiers en contentieux groupés par responsable.")
         if df_ctx.empty:
             st.info("Aucun dossier en contentieux. Ajoutez-les dans "
@@ -2473,7 +2633,7 @@ def page_export():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-    with tab4:
+    with tab5:
         st.markdown("Synthèse pour la direction : un seul tableau avec les "
                     "résumés de note les plus récents.")
         if st.button("🔧 Générer l'export direction", type="primary"):
