@@ -102,38 +102,42 @@ NATURES_CREANCE = [
 # Appels de fonds (stades d'avancement) — l'ordre est fixe, les libellés
 # peuvent varier légèrement. On détecte le n° de stade par mots-clés.
 APPELS_DE_FONDS = [
-    "1. Accord PC / Démarrage",
-    "2. Fondations",
-    "3. Achèvement des murs / Fin de maçonnerie",
+    "1. Accord du permis de construire",
+    "2. Achèvement des fondations",
+    "3. Achèvement des murs",
     "4. Mise hors d'eau",
-    "5. Hors d'air et fin de cloison",
-    "6. Fin de pose d'équipement",
+    "5. Achèvement des cloisons & mise hors d'air",
+    "6. Achèvement des travaux d'équipement",
     "7. Réception",
 ]
 
 
 def stage_from_situation(s):
     """Renvoie le n° d'appel de fonds (1-7) depuis un libellé de situation.
-    0 si non reconnu. Détection tolérante (accents/casse/variantes)."""
+    0 si non reconnu. Détection tolérante (accents/casse/variantes).
+
+    NB : on n'utilise PAS le mot 'achèvement' comme indice car il apparaît
+    dans plusieurs stades (fondations, murs, cloisons, équipement). On se
+    base uniquement sur des mots distinctifs."""
     import unicodedata as _u
     s = str(s or '').lower()
     s = _u.normalize('NFKD', s).encode('ascii', 'ignore').decode()
     if not s.strip():
         return 0
-    # Du plus tardif au plus précoce, avec mots-clés distinctifs
+    # Du plus tardif au plus précoce, mots-clés distinctifs uniquement
     if 'reception' in s:
         return 7
-    if 'equipement' in s or 'pose' in s:
+    if 'equipement' in s:
         return 6
-    if 'air' in s or 'cloison' in s:
+    if 'cloison' in s or 'air' in s:
         return 5
     if 'eau' in s:
         return 4
-    if 'mur' in s or 'maconnerie' in s or 'achevement' in s:
+    if 'mur' in s or 'maconnerie' in s:
         return 3
     if 'fondation' in s:
         return 2
-    if 'accord' in s or 'demarrage' in s or 'pc' in s:
+    if 'permis' in s or 'accord' in s or 'demarrage' in s:
         return 1
     return 0
 
