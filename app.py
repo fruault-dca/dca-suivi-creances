@@ -1796,14 +1796,26 @@ def page_creances():
     if f_en_cours.empty:
         st.caption("Aucun chantier en cours.")
     else:
-        synth_ec = f_en_cours.groupby(
+        # Trie par date de facture décroissante -> 'first' = dernière facture
+        fe = f_en_cours.copy()
+        if 'situation' not in fe.columns:
+            fe['situation'] = ''
+        fe = fe.sort_values('date_facture_eff', ascending=False)
+        synth_ec = fe.groupby(
             ['comp_aux_num', 'comp_aux_lib', 'ref_client',
              'commercial', 'conducteur', 'etat'], dropna=False).agg(
             solde=('solde', 'sum'),
             nb=('piece_ref', 'count'),
             derniere_facture=('date_facture_eff', 'max'),
+            situation_last=('situation', 'first'),
             jours_retard=('jours_retard', 'max')
         ).reset_index().sort_values('solde', ascending=False)
+
+        # Stade (appel de fonds) de la dernière facture
+        def _stade_label(s):
+            n = stage_from_situation(s)
+            return APPELS_DE_FONDS[n - 1] if 1 <= n <= 7 else ''
+        synth_ec['stade'] = synth_ec['situation_last'].apply(_stade_label)
 
         ka, kb = st.columns(2)
         ka.metric("Total dû en cours",
@@ -1811,12 +1823,14 @@ def page_creances():
         kb.metric("Nb dossiers", len(synth_ec))
 
         synth_ec['derniere_facture'] = fr_series(synth_ec['derniere_facture'])
+        synth_ec = synth_ec.drop(columns=['situation_last'])
         synth_ec_display = synth_ec.rename(columns={
             'comp_aux_num': 'Code compta', 'comp_aux_lib': 'Client',
             'ref_client': 'Ref dossier',
             'commercial': 'Commercial', 'conducteur': 'Conducteur',
             'etat': 'État', 'solde': 'Solde (€)',
             'nb': 'Nb lignes', 'derniere_facture': 'Dernière facture',
+            'stade': 'Stade dernière facture',
             'jours_retard': 'Jours retard'
         })
         styled_ec = synth_ec_display.style.map(_color_retard, subset=['Jours retard']) \
