@@ -1786,10 +1786,33 @@ def page_creances():
             return 'background-color: #F5D7A8; color: #8B5A00;'  # orange DCA
         return 'background-color: #F5BEB6; color: #7A1F12;'  # rouge DCA
 
+    # Affiche un tableau de synthèse avec sélection de ligne -> fiche Notes
+    def _table_with_nav(styled, display_df, key):
+        ev = st.dataframe(styled, use_container_width=True, hide_index=True,
+                          key=key, on_select='rerun',
+                          selection_mode='single-row')
+        try:
+            rows = ev.selection.rows
+        except Exception:
+            rows = []
+        if rows:
+            row = display_df.iloc[rows[0]]
+            comp = str(row.get('Code compta', '') or '')
+            client = str(row.get('Client', '') or row.get('Client FEC', ''))
+            if comp and st.button(f"📝 Ouvrir Notes & Relances — {client}",
+                                  key=f"goto_{key}", type="primary"):
+                st.session_state['preselect_client'] = comp
+                st.session_state['_came_from_creances'] = True
+                st.session_state['_nav_to'] = "📝 Notes & Relances"
+                st.rerun()
+
     # Split en 2 : chantiers en cours / chantiers livrés
     f_en_cours = f[~f.get('est_livre', False)] if 'est_livre' in f.columns else f
     f_livres = f[f.get('est_livre', False)] if 'est_livre' in f.columns \
         else f.iloc[0:0]
+
+    st.caption("💡 Cliquez sur une ligne d'un tableau ci-dessous pour ouvrir "
+               "la fiche Notes & Relances du client.")
 
     # --- Synthèse Chantiers EN COURS ---
     st.subheader("🏗️ Chantiers en cours")
@@ -1835,7 +1858,7 @@ def page_creances():
         })
         styled_ec = synth_ec_display.style.map(_color_retard, subset=['Jours retard']) \
             .format({'Solde (€)': '{:.2f}'})
-        st.dataframe(styled_ec, use_container_width=True, hide_index=True)
+        _table_with_nav(styled_ec, synth_ec_display, 'tbl_encours')
 
     # --- Synthèse Chantiers LIVRÉS ---
     st.subheader("🏠 Chantiers livrés")
@@ -1880,7 +1903,7 @@ def page_creances():
             .format({'Solde (€)': '{:.2f}',
                      'Consigné huissier (€)': '{:.2f}',
                      'Solde net (€)': '{:.2f}'})
-        st.dataframe(styled_lv, use_container_width=True, hide_index=True)
+        _table_with_nav(styled_lv, synth_lv_display, 'tbl_livres')
 
     # --- Sous-tableau Contentieux ---
     if not f_contentieux.empty:
@@ -1929,7 +1952,7 @@ def page_creances():
                      'Consigné huissier (€)': '{:.2f}',
                      'Prov. risque (€)': '{:.2f}',
                      'Prov. créances douteuses (€)': '{:.2f}'})
-        st.dataframe(styled_ct, use_container_width=True, hide_index=True)
+        _table_with_nav(styled_ct, synth_ct_display, 'tbl_contentieux')
 
     with st.expander("Détail ligne par ligne"):
         detail = f[['comp_aux_lib', 'piece_ref', 'ecriture_date', 'journal_code',
@@ -1969,7 +1992,26 @@ def page_notes():
 
     labels = {f"{r['comp_aux_lib']} — {r['solde']:,.0f} €".replace(",", " "): r['comp_aux_num']
               for _, r in clients.iterrows()}
-    sel = st.selectbox("Client", ['— Vue globale —'] + list(labels.keys()))
+    options_cli = ['— Vue globale —'] + list(labels.keys())
+
+    # Bouton retour si on est arrivé depuis la page Créances
+    if st.session_state.get('_came_from_creances'):
+        if st.button("← Retour aux créances"):
+            st.session_state.pop('_came_from_creances', None)
+            st.session_state['_nav_to'] = "📊 Créances"
+            st.rerun()
+
+    # Pré-sélection d'un client demandée depuis la page Créances
+    if 'preselect_client' in st.session_state:
+        pre = st.session_state.pop('preselect_client')
+        for lbl in options_cli:
+            if lbl != '— Vue globale —' and labels.get(lbl) == pre:
+                st.session_state['notes_client_select'] = lbl
+                break
+    # Sécurité : si la valeur mémorisée n'existe plus dans les options
+    if st.session_state.get('notes_client_select') not in options_cli:
+        st.session_state.pop('notes_client_select', None)
+    sel = st.selectbox("Client", options_cli, key='notes_client_select')
 
     if sel == '— Vue globale —':
         st.subheader(f"Toutes les relances ({len(notes_df)})")
@@ -3154,7 +3196,14 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    page = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
+    # Navigation programmatique : une autre page peut demander un changement
+    # via st.session_state['_nav_to'] (appliqué avant l'instanciation du radio)
+    if '_nav_to' in st.session_state:
+        target = st.session_state.pop('_nav_to')
+        if target in PAGES:
+            st.session_state['nav_radio'] = target
+    page = st.radio("Navigation", list(PAGES.keys()),
+                    label_visibility="collapsed", key='nav_radio')
     st.divider()
 
     # Utilise les créances rapprochées (cohérent avec la page Créances)
