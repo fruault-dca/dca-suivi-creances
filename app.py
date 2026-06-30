@@ -324,12 +324,13 @@ def check_pwd(plain: str, stored: str) -> bool:
         return False
 
 
-# ---- Cookie "se souvenir de moi" (jeton signé, 7 jours) ----
-REMEMBER_DAYS = 7
-COOKIE_NAME = 'dca_auth'
+# ---- Auth : jeton signé transmis par l'URL (cookies non fiables sur
+#      Streamlit Community Cloud — proxy ne transmet pas les cookies). ----
+# Utilisé pour ouvrir une fiche dans un nouvel onglet sans re-saisir le mdp.
+URL_TOKEN_TTL = 2 * 3600  # validité du jeton d'URL : 2 heures
 
 
-def _cookie_secret():
+def _auth_secret():
     """Clé de signature du jeton. Secret dédié si fourni, sinon dérivée
     de la clé du service account (déjà secrète et stable)."""
     try:
@@ -345,13 +346,12 @@ def _cookie_secret():
         return 'dca-fallback-secret'
 
 
-def _make_token(email):
-    exp = int(time.time()) + REMEMBER_DAYS * 24 * 3600
+def _make_token(email, ttl=URL_TOKEN_TTL):
+    exp = int(time.time()) + ttl
     msg = f"{email}|{exp}"
-    sig = hmac.new(_cookie_secret().encode(), msg.encode(),
+    sig = hmac.new(_auth_secret().encode(), msg.encode(),
                    hashlib.sha256).hexdigest()
     raw = f"{msg}|{sig}"
-    # base64 url-safe sans padding -> aucun caractère encodé par le cookie
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip('=')
 
 
@@ -359,17 +359,15 @@ def _verify_token(token):
     if not token:
         return None
     token = unquote(str(token)).strip().strip('"')
-    # Décode le base64 url-safe (avec tolérance ancien format brut)
-    raw = None
     try:
         pad = '=' * (-len(token) % 4)
         raw = base64.urlsafe_b64decode(token + pad).decode()
     except Exception:
-        raw = token  # transition : ancien format non encodé
+        return None
     try:
         email, exp, sig = raw.split('|')
         msg = f"{email}|{exp}"
-        good = hmac.new(_cookie_secret().encode(), msg.encode(),
+        good = hmac.new(_auth_secret().encode(), msg.encode(),
                         hashlib.sha256).hexdigest()
         if not hmac.compare_digest(good, sig):
             return None
@@ -380,61 +378,15 @@ def _verify_token(token):
         return None
 
 
-def _cookies():
-    """Contrôleur de cookies (1 instance par session)."""
-    try:
-        from streamlit_cookies_controller import CookieController
-        if '_cookie_ctrl' not in st.session_state:
-            st.session_state['_cookie_ctrl'] = CookieController()
-        return st.session_state['_cookie_ctrl']
-    except Exception:
-        return None
-
-
-def set_auth_cookie(email):
-    c = _cookies()
-    if c is not None:
-        try:
-            c.set(COOKIE_NAME, _make_token(email),
-                  max_age=REMEMBER_DAYS * 24 * 3600)
-        except Exception:
-            pass
-
-
-def clear_auth_cookie():
-    c = _cookies()
-    if c is not None:
-        try:
-            c.remove(COOKIE_NAME)
-        except Exception:
-            pass
-
-
-def _read_cookie(name):
-    """Lecture fiable du cookie : via la requête HTTP (st.context.cookies,
-    pas de course au démarrage), fallback sur le contrôleur."""
-    try:
-        v = st.context.cookies.get(name)
-        if v:
-            return v
-    except Exception:
-        pass
-    c = st.session_state.get('_cookie_ctrl')
-    if c is not None:
-        try:
-            return c.get(name)
-        except Exception:
-            return None
-    return None
-
-
-def try_cookie_login():
-    """Reconnecte automatiquement via le cookie si jeton valide."""
+def try_token_login():
+    """Connexion auto via un jeton signé dans l'URL (?t=...).
+    Sert pour l'ouverture d'une fiche dans un nouvel onglet."""
     if is_logged_in():
         return
-    if st.session_state.get('_no_auto_login'):
-        return
-    token = _read_cookie(COOKIE_NAME)
+    try:
+        token = st.query_params.get('t')
+    except Exception:
+        token = None
     email = _verify_token(token) if token else None
     if not email:
         return
@@ -457,15 +409,10 @@ def try_cookie_login():
 def login_user(email: str, nom: str):
     st.session_state['auth_email'] = email
     st.session_state['auth_nom'] = nom
-    # Écriture du cookie différée à un run complet (évite la perte au rerun)
-    st.session_state['_pending_cookie'] = email
-    st.session_state.pop('_no_auto_login', None)
 
 
 def logout_user():
-    clear_auth_cookie()
-    st.session_state['_no_auto_login'] = True
-    for k in ('auth_email', 'auth_nom', 'manual_user', '_pending_cookie'):
+    for k in ('auth_email', 'auth_nom', 'manual_user'):
         if k in st.session_state:
             del st.session_state[k]
 
@@ -482,24 +429,6 @@ def show_login():
     )
     st.title("💼 Suivi Créances DCA")
     st.caption("Connectez-vous pour accéder à l'application")
-
-    with st.expander("🔧 Diagnostic cookie (debug)"):
-        try:
-            ctx = dict(st.context.cookies)
-            st.write("st.context.cookies disponible :", True)
-            st.write("nb cookies vus :", len(ctx))
-            st.write("`dca_auth` présent :", COOKIE_NAME in ctx)
-            rawv = ctx.get(COOKIE_NAME)
-            st.write("longueur valeur :", len(rawv) if rawv else 0)
-            st.write("jeton valide :", bool(_verify_token(rawv)) if rawv else "n/a")
-        except Exception as e:
-            st.write("st.context.cookies INDISPONIBLE :", repr(e))
-        cc = st.session_state.get('_cookie_ctrl')
-        try:
-            st.write("controller.get dca_auth :",
-                     bool(cc.get(COOKIE_NAME)) if cc else "pas de controller")
-        except Exception as e:
-            st.write("controller erreur :", repr(e))
 
     df_users = read_sheet('users')
     if df_users.empty:
@@ -1963,7 +1892,8 @@ def page_creances():
                     st.session_state['_came_from_creances'] = True
                     st.session_state['_nav_to'] = "📝 Notes & Relances"
                     st.rerun()
-                url = f"?page=notes&client={quote(comp)}"
+                _tok = _make_token(st.session_state.get('auth_email', ''))
+                url = f"?page=notes&client={quote(comp)}&t={_tok}"
                 bcol2.markdown(
                     f'<a href="{url}" target="_blank" style="display:inline-block;'
                     f'padding:0.45rem 0.75rem;background:#2C3E50;color:#fff;'
@@ -3329,19 +3259,13 @@ PAGES = {
     "📤 Export": page_export,
 }
 
-# Monte le composant cookie tôt et à chaque run (écriture/lecture fiables)
-_cookies()
-
 # Check config before any page
 ok, msg = check_config()
 if ok and not is_logged_in():
-    try_cookie_login()  # reconnexion auto via cookie "se souvenir de moi"
+    try_token_login()  # connexion auto via jeton d'URL (ouverture nouvel onglet)
 if ok and not is_logged_in():
     show_login()
     st.stop()
-# Écrit le cookie "se souvenir de moi" sur un run complet (pas juste avant un rerun)
-if ok and is_logged_in() and st.session_state.get('_pending_cookie'):
-    set_auth_cookie(st.session_state.pop('_pending_cookie'))
 if not ok:
     st.error(f"❌ Configuration manquante : {msg}")
     st.info("""
