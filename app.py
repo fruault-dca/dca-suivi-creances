@@ -398,19 +398,31 @@ def clear_auth_cookie():
             pass
 
 
+def _read_cookie(name):
+    """Lecture fiable du cookie : via la requête HTTP (st.context.cookies,
+    pas de course au démarrage), fallback sur le contrôleur."""
+    try:
+        v = st.context.cookies.get(name)
+        if v:
+            return v
+    except Exception:
+        pass
+    c = st.session_state.get('_cookie_ctrl')
+    if c is not None:
+        try:
+            return c.get(name)
+        except Exception:
+            return None
+    return None
+
+
 def try_cookie_login():
     """Reconnecte automatiquement via le cookie si jeton valide."""
     if is_logged_in():
         return
     if st.session_state.get('_no_auto_login'):
         return
-    c = _cookies()
-    if c is None:
-        return
-    try:
-        token = c.get(COOKIE_NAME)
-    except Exception:
-        token = None
+    token = _read_cookie(COOKIE_NAME)
     email = _verify_token(token) if token else None
     if not email:
         return
@@ -3286,6 +3298,9 @@ PAGES = {
     "📝 Notes & Relances": page_notes,
     "📤 Export": page_export,
 }
+
+# Monte le composant cookie tôt et à chaque run (écriture/lecture fiables)
+_cookies()
 
 # Check config before any page
 ok, msg = check_config()
