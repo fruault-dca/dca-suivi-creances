@@ -111,3 +111,6 @@ Exports Excel : en-têtes bleu marine, totaux verts, format `#,##0.00 €`.
 App publique sur Streamlit Cloud → écran de login interne (`show_login`),
 mots de passe hashés PBKDF2 dans la feuille `users`. Pas de système de rôles
 actif (colonne `role` présente mais non câblée — tous les users ont accès à tout).
+Cookie "se souvenir de moi" (7 j, jeton HMAC signé via `streamlit-cookies-controller`) :
+`try_cookie_login()` au démarrage reconnecte sans mot de passe. Clé de signature =
+`secrets['auth']['cookie_secret']` si fournie, sinon dérivée de la clé du service account.

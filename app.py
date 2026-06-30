@@ -13,6 +13,7 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 import time, random
+import hmac, hashlib
 from urllib.parse import quote
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
@@ -323,12 +324,118 @@ def check_pwd(plain: str, stored: str) -> bool:
         return False
 
 
-def login_user(email: str, nom: str):
+# ---- Cookie "se souvenir de moi" (jeton signé, 7 jours) ----
+REMEMBER_DAYS = 7
+COOKIE_NAME = 'dca_auth'
+
+
+def _cookie_secret():
+    """Clé de signature du jeton. Secret dédié si fourni, sinon dérivée
+    de la clé du service account (déjà secrète et stable)."""
+    try:
+        s = st.secrets.get('auth', {}).get('cookie_secret')
+        if s:
+            return str(s)
+    except Exception:
+        pass
+    try:
+        base = str(st.secrets['gcp_service_account']['private_key'])
+        return hashlib.sha256(base.encode()).hexdigest()
+    except Exception:
+        return 'dca-fallback-secret'
+
+
+def _make_token(email):
+    exp = int(time.time()) + REMEMBER_DAYS * 24 * 3600
+    msg = f"{email}|{exp}"
+    sig = hmac.new(_cookie_secret().encode(), msg.encode(),
+                   hashlib.sha256).hexdigest()
+    return f"{msg}|{sig}"
+
+
+def _verify_token(token):
+    try:
+        email, exp, sig = str(token).split('|')
+        msg = f"{email}|{exp}"
+        good = hmac.new(_cookie_secret().encode(), msg.encode(),
+                        hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(good, sig):
+            return None
+        if int(exp) < int(time.time()):
+            return None
+        return email
+    except Exception:
+        return None
+
+
+def _cookies():
+    """Contrôleur de cookies (1 instance par session)."""
+    try:
+        from streamlit_cookies_controller import CookieController
+        if '_cookie_ctrl' not in st.session_state:
+            st.session_state['_cookie_ctrl'] = CookieController()
+        return st.session_state['_cookie_ctrl']
+    except Exception:
+        return None
+
+
+def set_auth_cookie(email):
+    c = _cookies()
+    if c is not None:
+        try:
+            c.set(COOKIE_NAME, _make_token(email),
+                  max_age=REMEMBER_DAYS * 24 * 3600)
+        except Exception:
+            pass
+
+
+def clear_auth_cookie():
+    c = _cookies()
+    if c is not None:
+        try:
+            c.remove(COOKIE_NAME)
+        except Exception:
+            pass
+
+
+def try_cookie_login():
+    """Reconnecte automatiquement via le cookie si jeton valide."""
+    if is_logged_in():
+        return
+    c = _cookies()
+    if c is None:
+        return
+    try:
+        token = c.get(COOKIE_NAME)
+    except Exception:
+        token = None
+    email = _verify_token(token) if token else None
+    if not email:
+        return
+    df_users = read_sheet('users')
+    if df_users.empty or 'email' not in df_users.columns:
+        return
+    emails = df_users['email'].fillna('').astype(str).str.lower()
+    row = df_users[emails == email.lower()]
+    if row.empty:
+        return
+    actif = str(row.iloc[0].get('actif', 'oui')).lower() in (
+        'oui', 'true', '1', 'yes', '')
+    if not actif:
+        return
+    nom = row.iloc[0].get('nom_affichage', email) or email
     st.session_state['auth_email'] = email
     st.session_state['auth_nom'] = nom
 
 
+def login_user(email: str, nom: str):
+    st.session_state['auth_email'] = email
+    st.session_state['auth_nom'] = nom
+    set_auth_cookie(email)
+
+
 def logout_user():
+    clear_auth_cookie()
     for k in ('auth_email', 'auth_nom', 'manual_user'):
         if k in st.session_state:
             del st.session_state[k]
@@ -3177,6 +3284,8 @@ PAGES = {
 
 # Check config before any page
 ok, msg = check_config()
+if ok and not is_logged_in():
+    try_cookie_login()  # reconnexion auto via cookie "se souvenir de moi"
 if ok and not is_logged_in():
     show_login()
     st.stop()
