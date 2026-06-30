@@ -402,6 +402,8 @@ def try_cookie_login():
     """Reconnecte automatiquement via le cookie si jeton valide."""
     if is_logged_in():
         return
+    if st.session_state.get('_no_auto_login'):
+        return
     c = _cookies()
     if c is None:
         return
@@ -431,12 +433,15 @@ def try_cookie_login():
 def login_user(email: str, nom: str):
     st.session_state['auth_email'] = email
     st.session_state['auth_nom'] = nom
-    set_auth_cookie(email)
+    # Écriture du cookie différée à un run complet (évite la perte au rerun)
+    st.session_state['_pending_cookie'] = email
+    st.session_state.pop('_no_auto_login', None)
 
 
 def logout_user():
     clear_auth_cookie()
-    for k in ('auth_email', 'auth_nom', 'manual_user'):
+    st.session_state['_no_auto_login'] = True
+    for k in ('auth_email', 'auth_nom', 'manual_user', '_pending_cookie'):
         if k in st.session_state:
             del st.session_state[k]
 
@@ -3289,6 +3294,9 @@ if ok and not is_logged_in():
 if ok and not is_logged_in():
     show_login()
     st.stop()
+# Écrit le cookie "se souvenir de moi" sur un run complet (pas juste avant un rerun)
+if ok and is_logged_in() and st.session_state.get('_pending_cookie'):
+    set_auth_cookie(st.session_state.pop('_pending_cookie'))
 if not ok:
     st.error(f"❌ Configuration manquante : {msg}")
     st.info("""
