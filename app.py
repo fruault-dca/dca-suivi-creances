@@ -13,6 +13,7 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 import time, random
+from urllib.parse import quote
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
 
@@ -1799,12 +1800,23 @@ def page_creances():
             row = display_df.iloc[rows[0]]
             comp = str(row.get('Code compta', '') or '')
             client = str(row.get('Client', '') or row.get('Client FEC', ''))
-            if comp and st.button(f"📝 Ouvrir Notes & Relances — {client}",
-                                  key=f"goto_{key}", type="primary"):
-                st.session_state['preselect_client'] = comp
-                st.session_state['_came_from_creances'] = True
-                st.session_state['_nav_to'] = "📝 Notes & Relances"
-                st.rerun()
+            if comp:
+                bcol1, bcol2 = st.columns([2, 2])
+                if bcol1.button(f"📝 Notes & Relances — {client}",
+                                key=f"goto_{key}", type="primary",
+                                use_container_width=True):
+                    st.session_state['preselect_client'] = comp
+                    st.session_state['_came_from_creances'] = True
+                    st.session_state['_nav_to'] = "📝 Notes & Relances"
+                    st.rerun()
+                url = f"?page=notes&client={quote(comp)}"
+                bcol2.markdown(
+                    f'<a href="{url}" target="_blank" style="display:inline-block;'
+                    f'padding:0.45rem 0.75rem;background:#2C3E50;color:#fff;'
+                    f'border-radius:0.5rem;text-decoration:none;font-weight:600;'
+                    f'font-size:0.85rem;text-align:center;width:100%;'
+                    f'box-sizing:border-box;">↗ Nouvel onglet</a>',
+                    unsafe_allow_html=True)
 
     # Split en 2 : chantiers en cours / chantiers livrés
     f_en_cours = f[~f.get('est_livre', False)] if 'est_livre' in f.columns else f
@@ -3196,6 +3208,19 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    # Deep-link via paramètres d'URL (?page=notes&client=XXX), 1x par session
+    if not st.session_state.get('_qp_done'):
+        _qp = st.query_params
+        _pg = _qp.get('page')
+        _map_pg = {'accueil': "🏠 Accueil", 'import': "📥 Import",
+                   'creances': "📊 Créances", 'notes': "📝 Notes & Relances",
+                   'export': "📤 Export"}
+        if _pg in _map_pg:
+            st.session_state['nav_radio'] = _map_pg[_pg]
+        if _qp.get('client'):
+            st.session_state['preselect_client'] = _qp.get('client')
+        st.session_state['_qp_done'] = True
+
     # Navigation programmatique : une autre page peut demander un changement
     # via st.session_state['_nav_to'] (appliqué avant l'instanciation du radio)
     if '_nav_to' in st.session_state:
