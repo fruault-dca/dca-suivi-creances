@@ -483,6 +483,24 @@ def show_login():
     st.title("💼 Suivi Créances DCA")
     st.caption("Connectez-vous pour accéder à l'application")
 
+    with st.expander("🔧 Diagnostic cookie (debug)"):
+        try:
+            ctx = dict(st.context.cookies)
+            st.write("st.context.cookies disponible :", True)
+            st.write("nb cookies vus :", len(ctx))
+            st.write("`dca_auth` présent :", COOKIE_NAME in ctx)
+            rawv = ctx.get(COOKIE_NAME)
+            st.write("longueur valeur :", len(rawv) if rawv else 0)
+            st.write("jeton valide :", bool(_verify_token(rawv)) if rawv else "n/a")
+        except Exception as e:
+            st.write("st.context.cookies INDISPONIBLE :", repr(e))
+        cc = st.session_state.get('_cookie_ctrl')
+        try:
+            st.write("controller.get dca_auth :",
+                     bool(cc.get(COOKIE_NAME)) if cc else "pas de controller")
+        except Exception as e:
+            st.write("controller erreur :", repr(e))
+
     df_users = read_sheet('users')
     if df_users.empty:
         st.error("Aucun utilisateur n'est encore enregistré dans le système.")
