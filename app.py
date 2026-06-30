@@ -13,8 +13,8 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 import time, random
-import hmac, hashlib
-from urllib.parse import quote
+import hmac, hashlib, base64
+from urllib.parse import quote, unquote
 
 st.set_page_config(page_title="Suivi Créances Clients", page_icon="📊", layout="wide")
 
@@ -350,12 +350,24 @@ def _make_token(email):
     msg = f"{email}|{exp}"
     sig = hmac.new(_cookie_secret().encode(), msg.encode(),
                    hashlib.sha256).hexdigest()
-    return f"{msg}|{sig}"
+    raw = f"{msg}|{sig}"
+    # base64 url-safe sans padding -> aucun caractère encodé par le cookie
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip('=')
 
 
 def _verify_token(token):
+    if not token:
+        return None
+    token = unquote(str(token)).strip().strip('"')
+    # Décode le base64 url-safe (avec tolérance ancien format brut)
+    raw = None
     try:
-        email, exp, sig = str(token).split('|')
+        pad = '=' * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(token + pad).decode()
+    except Exception:
+        raw = token  # transition : ancien format non encodé
+    try:
+        email, exp, sig = raw.split('|')
         msg = f"{email}|{exp}"
         good = hmac.new(_cookie_secret().encode(), msg.encode(),
                         hashlib.sha256).hexdigest()
