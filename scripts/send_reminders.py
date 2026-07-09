@@ -37,9 +37,15 @@ SCOPES = [
 J_URGENT = 3  # à traiter dans les 3 prochains jours
 
 
+try:
+    from requests.exceptions import RequestException
+except Exception:  # pragma: no cover
+    RequestException = ()
+
+
 def _with_retry(fn, *args, **kwargs):
-    """Retry avec backoff exponentiel sur les erreurs transitoires Google
-    (429 quota, 500/502/503 erreurs serveur)."""
+    """Retry avec backoff exponentiel sur les erreurs transitoires :
+    429 quota, 500/502/503, et erreurs réseau (timeout/connexion bloquée)."""
     last_exc = None
     for attempt in range(5):
         try:
@@ -58,6 +64,13 @@ def _with_retry(fn, *args, **kwargs):
                   f"nouvel essai dans {wait:.1f}s "
                   f"(tentative {attempt + 1}/5)...")
             time.sleep(wait)
+        except RequestException as e:
+            last_exc = e
+            wait = (2 ** attempt) + random.random()
+            print(f"[retry] Erreur réseau ({type(e).__name__}), "
+                  f"nouvel essai dans {wait:.1f}s "
+                  f"(tentative {attempt + 1}/5)...")
+            time.sleep(wait)
     raise last_exc
 
 
@@ -66,6 +79,15 @@ def get_spreadsheet():
     creds_dict = json.loads(raw)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
+    # Timeout sur les requêtes gspread : évite que le job pende indéfiniment
+    # sur un appel réseau bloqué (sinon annulation au timeout du job).
+    try:
+        client.set_timeout(30)
+    except Exception:
+        try:
+            client.http_client.timeout = 30
+        except Exception:
+            pass
     return _with_retry(client.open_by_key, os.environ["SHEET_ID"])
 
 
